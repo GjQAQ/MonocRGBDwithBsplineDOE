@@ -1,0 +1,150 @@
+{
+  "summary_max_images": {
+    "type": "int",
+    "default": 4
+  },
+  "summary_image_sz": {
+    "type": "int",
+    "default": 256
+  },
+  "summary_mask_sz": {
+    "type": "int",
+    "default": 256
+  },
+  "summary_depth_every": {
+    "type": "int",
+    "default": 1
+  },
+  "summary_track_train_every": {
+    "type": "int",
+    "default": 4000
+  },
+
+  "cnn_lr": {
+    "type": "float",
+    "default": 1e-3
+  },
+  "optics_lr": {
+    "type": "float",
+    "default": 1e-9
+  },
+  "batch_sz": {
+    "type": "int",
+    "default": 1
+  },
+  "num_workers": {
+    "type": "int",
+    "default": 8
+  },
+  "randcrop": {
+    "default": false,
+    "action": "store_true"
+  },
+  "augment": {
+    "default": false,
+    "action": "store_true"
+  },
+
+  "depth_loss_weight": {
+    "type": "float",
+    "default": 1
+  },
+  "image_loss_weight": {
+    "type": "float",
+    "default": 1
+  },
+  "psf_loss_weight": {
+    "type": "float",
+    "default": 1
+  },
+  "psf_size": {
+    "type": "int",
+    "default": 64
+  },
+
+  "image_sz": {
+    "type": "int",
+    "default": 256
+  },
+  "n_depths": {
+    "type": "int",
+    "default": 16
+  },
+  "min_depth": {
+    "type": "float",
+    "default": 1
+  },
+  "max_depth": {
+    "type": "float",
+    "default": 5
+  },
+  "crop_width": {
+    "type": "int",
+    "default": 32
+  },
+
+  "reg_tikhonov": {
+    "type": "float",
+    "default": 1
+  },
+  "model_base_ch": {
+    "type": "int",
+    "default": 32
+  },
+
+  "camera_type": {
+    "type": "str",
+    "default": "mixed"
+  },
+  "mask_sz": {
+    "type": "int",
+    "default": 8000
+  },
+  "focal_length": {
+    "type": "float",
+    "default": 50e-3
+  },
+  "focal_depth": {
+    "type": "float",
+    "default": 1.7
+  },
+  "f_number": {
+    "type": "float",
+    "default": 6.3
+  },
+  "camera_pixel_pitch": {
+    "type": "float",
+    "default": 6.45e-6
+  },
+  "noise_sigma_min": {
+    "type": "float",
+    "default": 1e-3
+  },
+  "noise_sigma_max": {
+    "type": "float",
+    "default": 5e-3
+  },
+  "full_size": {
+    "type": "int",
+    "default": 1920
+  },
+  "mask_upsample_factor": {
+    "type": "int",
+    "default": 10
+  },
+  "diffraction_efficiency": {
+    "type": "float",
+    "default": 0.7
+  },
+
+  "#flag": {
+    "preinverse": true,
+    "bayer": true,
+    "occlusion": true,
+    "optimize_optics": false,
+    "psfjitter": {
+      "dest": "psf_jitter",
+      "default": true
+    }
+  }
+}

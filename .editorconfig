@@ -1,0 +1,3 @@
+[*.py]
+ij_python_continuation_indent_size = 4
+ij_python_use_continuation_indent_for_arguments = true
