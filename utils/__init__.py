@@ -91,6 +91,20 @@ def ips_to_metric(d, min_depth, max_depth):
     return (max_depth * min_depth) / (max_depth - (max_depth - min_depth) * d)
 
 
+def metric_to_ips(d, min_depth, max_depth):
+    """
+
+    Args:
+        d: metric depth [min_depth, max_depth]
+        min_depth: in meter
+        max_depth: in meter
+
+    Returns:
+    """
+    # d = d.clamp(min_depth, max_depth)
+    return (max_depth * d - max_depth * min_depth) / ((max_depth - min_depth) * d)
+
+
 def complex_matmul(a, b):
     ar, ai = a.real, a.imag
     br, bi = b.real, b.imag

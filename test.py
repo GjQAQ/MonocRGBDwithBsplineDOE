@@ -52,6 +52,7 @@ def main(args):
         for key, value in ckpt['state_dict'].items()
         if 'decoder' in key
     })
+    model = model.to(device)
     model.eval()
 
     save_name = os.path.splitext(os.path.basename(args.captimg_path))[0]
@@ -97,7 +98,6 @@ def main(args):
     image_sz = captimg_linear.shape[-2:]
 
     captimg_linear = captimg_linear.to(device)
-    model = model.to(device)
 
     psf = model.camera.normalize_psf(model.camera.psf_at_camera(image_sz).unsqueeze(0))
     psf_cropped = utils.crop_psf(psf, image_sz)
@@ -122,7 +122,8 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument('--captimg_path', type=str)
+    parser.add_argument('--captimg_path', type=str, default='')
+    parser.add_argument('--original-image-path', type=str, default='')
     parser.add_argument('--ckpt_path', type=str, default='data/checkpoints/checkpoint.ckpt')
 
     parser = SnapshotDepth.add_model_specific_args(parser, os.path.join('model', 'model_args.json'))

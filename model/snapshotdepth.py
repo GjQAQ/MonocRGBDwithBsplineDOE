@@ -124,7 +124,7 @@ class SnapshotDepth(pl.LightningModule):
         logs.update(loss_logs)
         logs.update(misc_logs)
 
-        if not self.global_step % self.hparams.summary_track_train_every:
+        if not (self.global_step % self.hparams.summary_track_train_every):
             self.__log_images(outputs, 'train')
 
         self.log_dict(logs)
@@ -175,7 +175,7 @@ class SnapshotDepth(pl.LightningModule):
             psf = self.camera.psf_at_camera(is_training=torch.tensor(False)).unsqueeze(0)
         else:
             captimgs, target_volumes, psf = self.camera.forward(
-                img_linear, depthmap, occlusion=self.hparams.occlusion
+                img_linear, depthmap, self.hparams.occlusion
             )
 
         # add some Gaussian noise
@@ -302,53 +302,67 @@ class SnapshotDepth(pl.LightningModule):
 
     @torch.no_grad()
     def __log_images(self, output: FinalOutput, tag: str):
-        return  # todo
+        content = self.__generate_image_log(
+            output,
+            tag,
+            self.hparams.optimize_optics or self.global_step == 0
+        )
+        for k, v in content.items():
+            self.logger.experiment.add_image(k, v, self.global_step, dataformats='CHW')
+
+    @torch.no_grad()
+    def __generate_image_log(self, output: FinalOutput, tag: str, log_psf: bool):
         # Unpack outputs
-        captimgs = output.capt_img
-        est_images = output.est_img
-        est_depthmaps = output.est_depthmap
+        res = {}
 
         summary_image_sz = self.hparams.summary_image_sz
         # CAUTION! Summary image is clamped, and visualized in sRGB.
-        summary_max_images = min(self.hparams.summary_max_images, captimgs.shape[0])
+
         captimgs, target_images, target_depthmaps, est_images, est_depthmaps = [
-            _img_resize(x, summary_image_sz)
-            for x in [captimgs, output.target_img, output.target_depthmap, est_images, est_depthmaps]
+            _img_resize(output[x], summary_image_sz).to('cpu')
+            for x in [0, 4, 5, 2, 3]
         ]
         target_depthmaps = _gray_to_rgb(1.0 - target_depthmaps)
         est_depthmaps = _gray_to_rgb(1.0 - est_depthmaps)  # Flip [0, 1] for visualization purpose
-        summary = torch.cat([captimgs, target_images, est_images, target_depthmaps, est_depthmaps], dim=-3)
-        summary = summary[:summary_max_images]
-        grid_summary = torchvision.utils.make_grid(summary, nrow=summary_max_images)
-        self.logger.experiment.add_image(f'{tag}/summary', grid_summary, self.global_step)
 
-        if self.hparams.optimize_optics or self.global_step == 0:
+        # summary = torch.cat([captimgs, target_images, est_images, target_depthmaps, est_depthmaps], dim=-3)
+        # summary = summary[:summary_max_images]
+        summary = torch \
+            .stack([captimgs, target_images, est_images, target_depthmaps, est_depthmaps]) \
+            .transpose(0, 1) \
+            .reshape(-1, 3, summary_image_sz, summary_image_sz)
+        grid_summary = torchvision.utils.make_grid(summary, nrow=5)
+        res[f'{tag}/summary'] = grid_summary
+
+        if log_psf:
             # PSF and heightmap is not visualized at computed size.
             psf = self.camera.psf_at_camera((128, 128), is_training=torch.tensor(False))
             psf = optics.normalize_psf(psf)
             psf = fft.fftshift(utils.crop_psf(psf, 64), dims=(-1, -2))
             psf /= psf.max()
+            grid_psf = torchvision.utils.make_grid(
+                psf[:, ::self.hparams.summary_depth_every].transpose(0, 1),
+                nrow=4, pad_value=1, normalize=False
+            )
+            res['optics/psf'] = grid_psf
+
             heightmap = _img_resize(
                 self.camera.heightmap()[None, None, ...],
                 [self.hparams.summary_mask_sz, self.hparams.summary_mask_sz]
             ).squeeze(0)
             heightmap -= heightmap.min()
             heightmap /= heightmap.max()
-            grid_psf = torchvision.utils.make_grid(
-                psf[:, ::self.hparams.summary_depth_every].transpose(0, 1),
-                nrow=3, pad_value=1, normalize=False
-            )
-            self.logger.experiment.add_image('optics/psf', grid_psf, self.global_step)
-            self.logger.experiment.add_image('optics/heightmap', heightmap, self.global_step)
+            res['optics/heightmap'] = heightmap
 
             psf /= psf \
                 .max(dim=-1, keepdim=True)[0] \
                 .max(dim=-2, keepdim=True)[0] \
                 .max(dim=0, keepdim=True)[0]
             grid_psf = torchvision.utils.make_grid(
-                psf.transpose(0, 1), nrow=3, pad_value=1, normalize=False
+                psf.transpose(0, 1), nrow=4, pad_value=1, normalize=False
             )
-            self.logger.experiment.add_image('optics/psf_stretched', grid_psf, self.global_step)
+            res['optics/psf_stretched'] = grid_psf
+        return res
 
     @staticmethod
     def add_model_specific_args(parent_parser, arg_config_file):

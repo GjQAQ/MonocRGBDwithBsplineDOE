@@ -62,15 +62,15 @@ def _depthmap2layers(depthmap, n_depths, binary=False):
     ).reshape(1, 1, -1, 1, 1) + 1
     depthmap = depthmap * n_depths
     diff = d - depthmap
-    layered_depth = torch.zeros_like(diff)
+    layered_mask = torch.zeros_like(diff)
     if binary:
-        layered_depth[torch.logical_and(diff >= 0., diff < 1.)] = 1.
+        layered_mask[torch.logical_and(diff >= 0., diff < 1.)] = 1.
     else:
         mask = torch.logical_and(diff > -1., diff <= 0.)
-        layered_depth[mask] = diff[mask] + 1.
-        layered_depth[torch.logical_and(diff > 0., diff <= 1.)] = 1.
+        layered_mask[mask] = diff[mask] + 1.
+        layered_mask[torch.logical_and(diff > 0., diff <= 1.)] = 1.
 
-    return layered_depth
+    return layered_mask
 
 
 class RotationallySymmetricCamera(optics.Camera):
@@ -380,6 +380,6 @@ Input image size: {self.__image_size}
         return amplitude, phase
 
     def __get_capt_img(self, img, depthmap, psf, occlusion):
-        layered_depth = _depthmap2layers(depthmap, self.__n_depths, binary=True)
-        volume = layered_depth * img[:, :, None, ...]
-        return algorithm.image.image_formation(volume, layered_depth, psf, occlusion)
+        layered_mask = _depthmap2layers(depthmap, self.__n_depths, binary=True)
+        volume = layered_mask * img[:, :, None, ...]
+        return algorithm.image.image_formation(volume, layered_mask, psf, occlusion)
