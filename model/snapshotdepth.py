@@ -18,12 +18,8 @@ import dataset
 import utils
 import algorithm.fft as fft
 import algorithm.inverse as inverse
-import optics
+import optics.bsac as bsac
 import optics.rsc as rsc
-
-
-def _img_resize(img, size):
-    return functional.interpolate(img, size=size)
 
 
 def _gray_to_rgb(x):
@@ -65,7 +61,8 @@ class SnapshotDepth(pl.LightningModule):
         return optim.Adam([
             {'params': self.camera.parameters(), 'lr': self.hparams.optics_lr},
             {'params': self.decoder.parameters(), 'lr': self.hparams.cnn_lr},
-        ])
+        ]
+        )
 
     def optimizer_step(
         self,
@@ -113,12 +110,7 @@ class SnapshotDepth(pl.LightningModule):
             'train_misc/captimg_min': captimgs_linear.min(),
         }
         if self.hparams.optimize_optics:
-            misc_logs.update({
-                'optics/heightmap_max': self.camera.heightmap1d.max(),
-                'optics/heightmap_min': self.camera.heightmap1d.min(),
-                'optics/psf_out_of_fov_energy': loss_logs['train_loss/psf_loss'],
-                'optics/psf_out_of_fov_max': loss_logs['train_loss/psf_out_of_fov_max'],
-            })
+            misc_logs.update(self.camera.specific_log(psf_size=self.hparams.psf_size))
 
         logs = {}
         logs.update(loss_logs)
@@ -231,23 +223,30 @@ class SnapshotDepth(pl.LightningModule):
     def __build_model(self):
         hparams = self.hparams
         self.crop_width = hparams.crop_width
+
         camera_recipe = {
-            'wavelengths': [632e-9, 550e-9, 450e-9],
+            'wavelengths': (632e-9, 550e-9, 450e-9),
             'min_depth': hparams.min_depth,
             'max_depth': hparams.max_depth,
             'focal_depth': hparams.focal_depth,
             'n_depths': hparams.n_depths,
             'image_size': hparams.image_sz + 4 * self.crop_width,
-            'camera_pixel_pitch': hparams.camera_pixel_pitch,
+            'camera_pitch': hparams.camera_pixel_pitch,
             'focal_length': hparams.focal_length,
-            'mask_diameter': hparams.focal_length / hparams.f_number,
-            'mask_size': hparams.mask_sz,
-            'mask_upsample_factor': hparams.mask_upsample_factor,
-            'diffraction_efficiency': hparams.diffraction_efficiency,
-            'full_size': hparams.full_size
+            'aperture_diameter': hparams.focal_length / hparams.f_number,
+            'aperture_size': hparams.mask_sz,
+            'diffraction_efficiency': hparams.diffraction_efficiency
         }
+        if hparams.camera_type == 'b-spline':
+            self.camera = bsac.BSplineApertureCamera(**camera_recipe, requires_grad=hparams.optimize_optics)
+        elif hparams.camera_type == 'rotationally-symmetric' or hparams.camera_type == 'mixed':
+            extra = {
+                'full_size': hparams.full_size,
+                'aperture_upsample_factor': hparams.mask_upsample_factor
+            }
+            camera_recipe.update(extra)
+            self.camera = rsc.RotationallySymmetricCamera(**camera_recipe, requires_grad=hparams.optimize_optics)
 
-        self.camera = rsc.RotationallySymmetricCamera(**camera_recipe, requires_grad=hparams.optimize_optics)
         self.decoder = Reconstructor(
             hparams.preinverse, hparams.n_depths, hparams.model_base_ch
         )
@@ -319,14 +318,12 @@ class SnapshotDepth(pl.LightningModule):
         # CAUTION! Summary image is clamped, and visualized in sRGB.
 
         captimgs, target_images, target_depthmaps, est_images, est_depthmaps = [
-            _img_resize(output[x], summary_image_sz).to('cpu')
+            utils.img_resize(output[x], summary_image_sz).to('cpu')
             for x in [0, 4, 5, 2, 3]
         ]
         target_depthmaps = _gray_to_rgb(1.0 - target_depthmaps)
         est_depthmaps = _gray_to_rgb(1.0 - est_depthmaps)  # Flip [0, 1] for visualization purpose
 
-        # summary = torch.cat([captimgs, target_images, est_images, target_depthmaps, est_depthmaps], dim=-3)
-        # summary = summary[:summary_max_images]
         summary = torch \
             .stack([captimgs, target_images, est_images, target_depthmaps, est_depthmaps]) \
             .transpose(0, 1) \
@@ -337,7 +334,7 @@ class SnapshotDepth(pl.LightningModule):
         if log_psf:
             # PSF and heightmap is not visualized at computed size.
             psf = self.camera.psf_at_camera((128, 128), is_training=torch.tensor(False))
-            psf = optics.normalize_psf(psf)
+            psf = self.camera.normalize_psf(psf)
             psf = fft.fftshift(utils.crop_psf(psf, 64), dims=(-1, -2))
             psf /= psf.max()
             grid_psf = torchvision.utils.make_grid(
@@ -346,13 +343,7 @@ class SnapshotDepth(pl.LightningModule):
             )
             res['optics/psf'] = grid_psf
 
-            heightmap = _img_resize(
-                self.camera.heightmap()[None, None, ...],
-                [self.hparams.summary_mask_sz, self.hparams.summary_mask_sz]
-            ).squeeze(0)
-            heightmap -= heightmap.min()
-            heightmap /= heightmap.max()
-            res['optics/heightmap'] = heightmap
+            res['optics/heightmap'] = self.camera.heightmap_log([self.hparams.summary_mask_sz] * 2)
 
             psf /= psf \
                 .max(dim=-1, keepdim=True)[0] \

@@ -2,6 +2,8 @@ import typing
 
 import torch
 import torch.nn as nn
+import torch.nn.functional
+import matplotlib.pyplot as plt
 
 
 def __crop_psf(x, sz, i):
@@ -11,7 +13,8 @@ def __crop_psf(x, sz, i):
         x, dim=-2 + i, index=torch.cat([
             torch.arange(p, device=x.device),
             torch.arange(x.shape[-2 + i] - q, x.shape[-2 + i], device=x.device)
-        ], dim=0)
+        ], dim=0
+        )
     )
 
 
@@ -49,6 +52,10 @@ def crop_psf(x, sz: typing.Union[int, typing.Tuple, typing.List]):
     if isinstance(sz, int):
         sz = (sz, sz)
     return __crop_psf(__crop_psf(x, sz, 0), sz, 1)
+
+
+def img_resize(img, size):
+    return torch.nn.functional.interpolate(img, size=size)
 
 
 def linear_to_srgb(x, eps=1e-8):
@@ -119,3 +126,10 @@ def complex_transpose(a, *args, **kwargs):
 
 def complex_reshape(a, *args, **kwargs):
     return a.real.reshape(*args, **kwargs) + 1j * a.imag.reshape(*args, **kwargs)
+
+
+def visualize(img):
+    if len(img.shape) == 3:
+        img = img.permute(1, 2, 0)
+    plt.imshow((img / img.max() * 255).cpu())
+    plt.show()

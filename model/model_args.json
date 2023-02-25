@@ -94,7 +94,7 @@
 
   "camera_type": {
     "type": "str",
-    "default": "mixed"
+    "default": "b-spline"
   },
   "mask_sz": {
     "type": "int",

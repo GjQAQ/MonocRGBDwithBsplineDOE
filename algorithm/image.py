@@ -70,7 +70,7 @@ def __old_image_formation(volume, layered_mask, psf, occlusion, eps=1e-3):
 
     captimg = scale * captimg
     volume = scale * volume
-    return captimg, volume
+    return fft.fftshift(captimg), fft.fftshift(volume)
 
 
 image_formation = __old_image_formation

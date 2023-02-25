@@ -113,7 +113,7 @@ if __name__ == '__main__':
     mp.set_start_method('spawn')  # bug fix
     parser = argparse.ArgumentParser(add_help=False)
 
-    parser.add_argument('--experiment_name', type=str, default='LearnedDepth')
+    parser.add_argument('--experiment_name', type=str, default='ExtendedDOF')
     parser.add_argument('--mix_dualpixel_dataset', dest='mix_dualpixel_dataset', action='store_true')
     parser.add_argument('--last_checkpoint', type=str, default='')
 
