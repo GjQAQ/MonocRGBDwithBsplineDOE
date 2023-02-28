@@ -21,7 +21,6 @@ class SceneFlow(data.Dataset):
         random_crop: bool = False,
         augment: bool = False,
         padding: int = 0,
-        singleplane: bool = False,
         n_depths: int = 16,
         ignore_incomplete: bool = True
     ):
@@ -30,7 +29,8 @@ class SceneFlow(data.Dataset):
             'train': {
                 'img': os.path.join(
                     sf_root, 'FlyingThings3D_subset', 'train', 'image_clean', 'right'
-                ), 'disparity': os.path.join(
+                ),
+                'disparity': os.path.join(
                     sf_root, 'FlyingThings3D_subset_disparity', 'train', 'disparity', 'right'
                 )
             }
@@ -62,7 +62,6 @@ class SceneFlow(data.Dataset):
             raise ResourceWarning(f'Missing pfm files: {pfm_missing_ids}')
 
         self.__is_training = torch.tensor(is_training)
-        self.__singleplane = torch.tensor(singleplane)
         self.__padding = padding
         self.__n_depths = n_depths
         self.__partition = partition
@@ -88,9 +87,6 @@ class SceneFlow(data.Dataset):
         # SceneFlow's depthmap has some aliasing artifact. (dfd)
         depthmap = filters.gaussian_blur2d(depthmap, sigma=(0.8, 0.8), kernel_size=(5, 5))
         img, depthmap = img.squeeze(0), depthmap.squeeze(0)
-
-        if self.__singleplane:
-            raise NotImplementedError('SceneFlow dataset with singleplane=True has not been implemented')
 
         return dataset.ImageItem(id_, img, depthmap, torch.ones_like(depthmap))
 

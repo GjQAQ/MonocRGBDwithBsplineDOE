@@ -46,7 +46,7 @@ def main(args):
     hparams = ckpt['hyper_parameters']
     model = SnapshotDepth(hparams)
 
-    model.camera.original_heightmap1d.data = ckpt['state_dict']['camera._RotationallySymmetricCamera__heightmap1d']
+    model.camera.load_state_dict(ckpt['state_dict'])
     model.decoder.load_state_dict({
         key[8:]: value
         for key, value in ckpt['state_dict'].items()
@@ -123,7 +123,6 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--captimg_path', type=str, default='')
-    parser.add_argument('--original-image-path', type=str, default='')
     parser.add_argument('--ckpt_path', type=str, default='data/checkpoints/checkpoint.ckpt')
 
     parser = SnapshotDepth.add_model_specific_args(parser, os.path.join('model', 'model_args.json'))

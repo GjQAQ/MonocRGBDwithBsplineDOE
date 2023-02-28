@@ -131,5 +131,7 @@ def complex_reshape(a, *args, **kwargs):
 def visualize(img):
     if len(img.shape) == 3:
         img = img.permute(1, 2, 0)
-    plt.imshow((img / img.max() * 255).cpu())
+    img -= img.min()
+    img /= img.max()
+    plt.imshow(img.cpu())
     plt.show()

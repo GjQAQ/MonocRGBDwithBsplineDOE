@@ -36,7 +36,7 @@ def prepare_data(hparams):
         '/home/ps/Data/Guojiaqi/dataset/sceneflow',
         'train',
         (image_sz + 4 * crop_width, image_sz + 4 * crop_width),
-        random_crop=randcrop, augment=augment, padding=padding, singleplane=False
+        random_crop=randcrop, augment=augment, padding=padding
     )
     dualpixel = functools.partial(
         DualPixel,

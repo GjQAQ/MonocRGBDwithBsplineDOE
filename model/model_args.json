@@ -142,6 +142,7 @@
     "bayer": true,
     "occlusion": true,
     "optimize_optics": false,
+    "log_misc": false,
     "psfjitter": {
       "dest": "psf_jitter",
       "default": true

@@ -1,4 +1,7 @@
+from typing import Union, Dict
+
 import torch
+from torch import Tensor
 from torchvision.utils import make_grid
 import numpy as np
 import scipy.interpolate as intp
@@ -92,7 +95,12 @@ class BSplineApertureCamera(optics.Camera):
 
     def heightmap_log(self, size):
         heightmap = utils.img_resize(self.heightmap().unsqueeze(0), size)
+        heightmap -= heightmap.min()
+        heightmap /= heightmap.max()
         return make_grid(heightmap)
+
+    def load_state_dict(self, state_dict: Union[Dict[str, Tensor], Dict[str, Tensor]], strict: bool = True):
+        self.__control_points.data = state_dict['camera._BSplineApertureCamera__control_points']
 
     @property
     def device(self):

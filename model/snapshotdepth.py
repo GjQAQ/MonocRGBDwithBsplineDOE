@@ -94,32 +94,27 @@ class SnapshotDepth(pl.LightningModule):
         target_depthmaps = outputs.target_depthmap
         captimgs_linear = outputs.capt_linear
 
-        data_loss, loss_logs = self.__compute_loss(outputs, mask)
-        loss_logs = {f'train_loss/{key}': val for key, val in loss_logs.items()}
-
-        misc_logs = {
-            'train_misc/target_depth_max': target_depthmaps.max(),
-            'train_misc/target_depth_min': target_depthmaps.min(),
-            'train_misc/est_depth_max': est_depthmaps.max(),
-            'train_misc/est_depth_min': est_depthmaps.min(),
-            'train_misc/target_image_max': target_images.max(),
-            'train_misc/target_image_min': target_images.min(),
-            'train_misc/est_image_max': est_images.max(),
-            'train_misc/est_image_min': est_images.min(),
-            'train_misc/captimg_max': captimgs_linear.max(),
-            'train_misc/captimg_min': captimgs_linear.min(),
-        }
+        data_loss, logs = self.__compute_loss(outputs, mask)
+        logs = {f'train_loss/{key}': val for key, val in logs.items()}
+        if self.hparams.log_misc:
+            logs.update({
+                'train_misc/target_depth_max': target_depthmaps.max(),
+                'train_misc/target_depth_min': target_depthmaps.min(),
+                'train_misc/est_depth_max': est_depthmaps.max(),
+                'train_misc/est_depth_min': est_depthmaps.min(),
+                'train_misc/target_image_max': target_images.max(),
+                'train_misc/target_image_min': target_images.min(),
+                'train_misc/est_image_max': est_images.max(),
+                'train_misc/est_image_min': est_images.min(),
+                'train_misc/captimg_max': captimgs_linear.max(),
+                'train_misc/captimg_min': captimgs_linear.min(),
+            })
         if self.hparams.optimize_optics:
-            misc_logs.update(self.camera.specific_log(psf_size=self.hparams.psf_size))
-
-        logs = {}
-        logs.update(loss_logs)
-        logs.update(misc_logs)
+            logs.update(self.camera.specific_log(psf_size=self.hparams.psf_size))
+        self.log_dict(logs)
 
         if not (self.global_step % self.hparams.summary_track_train_every):
             self.__log_images(outputs, 'train')
-
-        self.log_dict(logs)
 
         return data_loss
 

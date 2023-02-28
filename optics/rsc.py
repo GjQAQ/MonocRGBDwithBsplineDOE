@@ -1,10 +1,12 @@
-import typing
+from typing import Union, Dict
+
 import math
 
 import torch
 import torch.nn.functional as functional
 import scipy
 import numpy as np
+from torch import Tensor
 
 import optics
 import utils
@@ -107,6 +109,9 @@ class RotationallySymmetricCamera(optics.Camera):
 
     def forward(self, img, depthmap, occlusion, is_training=torch.tensor(False)):
         return super().forward(img, depthmap, occlusion, is_training)
+
+    def load_state_dict(self, state_dict: Union[Dict[str, Tensor], Dict[str, Tensor]], strict: bool = True):
+        self.__heightmap1d.data = state_dict['camera._RotationallySymmetricCamera__heightmap1d']
 
     @property
     def heightmap1d(self):
