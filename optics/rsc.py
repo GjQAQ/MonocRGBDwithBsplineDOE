@@ -58,7 +58,7 @@ class RotationallySymmetricCamera(optics.Camera):
         psf_rd = functional.relu(cubic.interp(
             self.buf_rho_grid, psf1d, self.buf_rho_sampling, self.buf_ind
         ).float()
-                                 )
+        )
         psf_rd = psf_rd.reshape(
             self.n_wavelengths, self._n_depths,
             self._image_size[0] // 2, self._image_size[1] // 2
@@ -99,13 +99,10 @@ class RotationallySymmetricCamera(optics.Camera):
         return _copy_quadruple(heightmap11).squeeze()
 
     def specific_log(self, *args, **kwargs):
-        psf_loss = self.psf_out_energy(kwargs['psf_size'])
-        return {
-            'optics/heightmap_max': self.heightmap1d.max(),
-            'optics/heightmap_min': self.heightmap1d.min(),
-            'optics/psf_out_of_fov_energy': psf_loss[0],
-            'optics/psf_out_of_fov_max': psf_loss[1]
-        }
+        log = super().specific_log(*args, **kwargs)
+        log['optics/heightmap_max'] = self.heightmap1d.max()
+        log['optics/heightmap_min'] = self.heightmap1d.min()
+        return log
 
     def forward(self, img, depthmap, occlusion, is_training=torch.tensor(False)):
         return super().forward(img, depthmap, occlusion, is_training)

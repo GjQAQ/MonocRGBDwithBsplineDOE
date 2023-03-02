@@ -187,12 +187,12 @@ class SnapshotDepth(pl.LightningModule):
         # Crop the boundary artifact of DFT-based convolution
         captimgs = utils.crop_boundary(captimgs, self.crop_width)
         target_volumes = utils.crop_boundary(target_volumes, self.crop_width)
+        psf = utils.crop_boundary(psf, self.crop_width)
 
         if self.hparams.preinverse:
             # Apply the Tikhonov-regularized inverse
-            psf_cropped = utils.crop_psf(psf, captimgs.shape[-2:])
             pinv_volumes = inverse.tikhonov_inverse(
-                captimgs, psf_cropped, self.hparams.reg_tikhonov, True
+                captimgs, psf, self.hparams.reg_tikhonov, True
             )
         else:
             pinv_volumes = torch.zeros_like(target_volumes)
@@ -327,27 +327,11 @@ class SnapshotDepth(pl.LightningModule):
         res[f'{tag}/summary'] = grid_summary
 
         if log_psf:
-            # PSF and heightmap is not visualized at computed size.
-            psf = self.camera.psf_at_camera((128, 128), is_training=torch.tensor(False))
-            psf = self.camera.normalize_psf(psf)
-            psf = fft.fftshift(utils.crop_psf(psf, 64), dims=(-1, -2))
-            psf /= psf.max()
-            grid_psf = torchvision.utils.make_grid(
-                psf[:, ::self.hparams.summary_depth_every].transpose(0, 1),
-                nrow=4, pad_value=1, normalize=False
-            )
-            res['optics/psf'] = grid_psf
-
+            psf = self.camera.psf_log((128, 128), self.hparams.summary_depth_every)
+            res['optics/psf'] = psf[0]
+            res['optics/psf_stretched'] = psf[1]
             res['optics/heightmap'] = self.camera.heightmap_log([self.hparams.summary_mask_sz] * 2)
 
-            psf /= psf \
-                .max(dim=-1, keepdim=True)[0] \
-                .max(dim=-2, keepdim=True)[0] \
-                .max(dim=0, keepdim=True)[0]
-            grid_psf = torchvision.utils.make_grid(
-                psf.transpose(0, 1), nrow=4, pad_value=1, normalize=False
-            )
-            res['optics/psf_stretched'] = grid_psf
         return res
 
     @staticmethod

@@ -1,21 +1,7 @@
-import typing
-
 import torch
 import torch.nn as nn
 import torch.nn.functional
 import matplotlib.pyplot as plt
-
-
-def __crop_psf(x, sz, i):
-    p = (sz[i] - 1) // 2 + 1
-    q = sz[i] - p
-    return torch.index_select(
-        x, dim=-2 + i, index=torch.cat([
-            torch.arange(p, device=x.device),
-            torch.arange(x.shape[-2 + i] - q, x.shape[-2 + i], device=x.device)
-        ], dim=0
-        )
-    )
 
 
 def init_module(module: nn.Module):
@@ -34,24 +20,6 @@ def crop_boundary(x, w):
         return x
     else:
         return x[..., w:-w, w:-w]
-
-
-def crop_psf(x, sz: typing.Union[int, typing.Tuple, typing.List]):
-    """
-
-    Args:
-        x (torch.tensor): psf without applying fftshift (the center is upper left)
-            shape (S x D x H x W)
-        sz : size after cropping
-
-    Returns:
-        cropped psf
-            shape (S x D x n x n)
-
-    """
-    if isinstance(sz, int):
-        sz = (sz, sz)
-    return __crop_psf(__crop_psf(x, sz, 0), sz, 1)
 
 
 def img_resize(img, size):

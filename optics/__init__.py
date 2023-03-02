@@ -1,10 +1,13 @@
 import abc
+import functools
+
 import math
 import typing
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as functional
+import torchvision.utils
 import numpy as np
 
 import utils
@@ -83,18 +86,16 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
     def heightmap(self):
         pass
 
-    def heightmap_log(self, size):
-        heightmap = utils.img_resize(self.heightmap()[None, None, ...], size).squeeze(0)
-        heightmap -= heightmap.min()
-        heightmap /= heightmap.max()
-        return heightmap
+    @abc.abstractmethod
+    def aberration(self, u, v, wavelength=None):
+        pass
 
     def extra_repr(self):
         return f'''
 Camera module...
 Refcative index for center wavelength: {self.refractive_index(self.buf_wavelengths[self.n_wavelengths // 2])}
 Aperture pitch: {self.aperture_pitch * 1e6}[um]
-f number: {self.f_number}
+f number: {self.f_number:.3f}
 Depths: {self.buf_scene_distances}
 Input image size: {self._image_size}
               '''
@@ -112,7 +113,7 @@ Input image size: {self._image_size}
 
     def psf_at_camera(
         self,
-        size=None,
+        size: typing.Tuple[int, int] = None,
         modulate_phase=torch.tensor(True),
         is_training=torch.tensor(False)
     ):
@@ -153,10 +154,31 @@ Input image size: {self._image_size}
             pad_h = (size[0] - self._image_size[0]) // 2
             pad_w = (size[1] - self._image_size[1]) // 2
             psf = functional.pad(psf, (pad_w, pad_w, pad_h, pad_h), mode='constant', value=0)
-        return fft.fftshift(psf, dims=(-1, -2))
+        return psf
+
+    def heightmap_log(self, size):
+        heightmap = utils.img_resize(self.heightmap()[None, None, ...], size).squeeze(0)
+        heightmap -= heightmap.min()
+        heightmap /= heightmap.max()
+        return heightmap
+
+    def psf_log(self, log_size, depth_step):
+        # PSF is not visualized at computed size.
+        psf = self.psf_at_camera(log_size, is_training=torch.tensor(False)).cpu()
+        psf = self.normalize_psf(psf)
+        psf /= psf.max()
+        streched_psf = psf \
+            .max(dim=-1, keepdim=True)[0] \
+            .max(dim=-2, keepdim=True)[0] \
+            .max(dim=0, keepdim=True)[0]  # todo
+        return self.__make_grid(psf, depth_step), self.__make_grid(streched_psf, depth_step)
 
     def specific_log(self, *args, **kwargs):
-        return {}
+        psf_loss = self.psf_out_energy(kwargs['psf_size'])
+        return {
+            'optics/psf_out_of_fov_energy': psf_loss[0],
+            'optics/psf_out_of_fov_max': psf_loss[1]
+        }
 
     @property
     def f_number(self):
@@ -174,6 +196,14 @@ Input image size: {self._image_size}
     def n_wavelengths(self):
         return len(self.buf_wavelengths)
 
+    @property
+    def camera_pitch(self):
+        return self._camera_pitch
+
+    @property
+    def aperture_diameter(self):
+        return self._aperture_diameter
+
     def __register_wavlength(self, wavelengths):
         if isinstance(wavelengths, tuple):
             wavelengths = torch.tensor(wavelengths)
@@ -189,6 +219,13 @@ Input image size: {self._image_size}
             self.register_buffer('buf_wavelengths', wavelengths)
         else:
             self.buf_wavelengths = wavelengths.to(self.buf_wavelengths.device)
+
+    def __make_grid(self, image, depth_step):
+        # expect image with shape CxDxHxW
+        return torchvision.utils.make_grid(
+            image[:, ::depth_step].transpose(0, 1),
+            nrow=4, pad_value=1, normalize=False
+        )
 
     @staticmethod
     def normalize_psf(psf):
