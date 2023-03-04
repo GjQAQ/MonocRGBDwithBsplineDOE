@@ -1,18 +1,17 @@
 import abc
-import functools
 
 import math
 import typing
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as functional
 import torchvision.utils
 import numpy as np
 
 import utils
+import utils.fft as fft
+import utils.old_complex as old_complex
 import algorithm.image
-import algorithm.fft as fft
 
 
 def _depthmap2layers(depthmap, n_depths, binary=False):
@@ -62,10 +61,10 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
         self._n_depths = n_depths
         self._min_depth = min_depth
         self._max_depth = max_depth
-        self._focal_depth = focal_depth
+        self.__focal_depth = focal_depth
         self._aperture_diameter = aperture_diameter
         self._camera_pitch = camera_pitch
-        self._focal_length = focal_length
+        self.__focal_length = focal_length
         self._image_size = self.normalize_image_size(image_size)
         self._aperture_size = aperture_size
 
@@ -73,6 +72,8 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
 
         self.__register_wavlength(wavelengths)
         self.register_buffer('buf_scene_distances', scene_distances)
+
+        self.__psf_cache = None
 
     @abc.abstractmethod
     def psf(self, scene_distances, modulate_phase):
@@ -100,7 +101,7 @@ Depths: {self.buf_scene_distances}
 Input image size: {self._image_size}
               '''
 
-    def forward(self, img, depthmap, occlusion, is_training=torch.tensor(False)):
+    def forward(self, img, depthmap, occlusion, is_training=False):
         psf = self.psf_at_camera(img.shape[-2:], is_training=is_training).unsqueeze(0)
         psf = self.normalize_psf(psf)
         captimg, volume = self.get_capt_img(img, depthmap, psf, occlusion)
@@ -114,11 +115,13 @@ Input image size: {self._image_size}
     def psf_at_camera(
         self,
         size: typing.Tuple[int, int] = None,
-        modulate_phase=torch.tensor(True),
-        is_training=torch.tensor(False)
+        is_training: bool = False,
+        use_psf_cache: bool = False
     ):
-        device = self.device
+        if use_psf_cache and self.__psf_cache is not None:
+            return utils.pad_or_crop(self.__psf_cache, size)
 
+        device = self.device
         init_sd = torch.linspace(0, 1, steps=self._n_depths, device=device)
         if is_training:
             init_sd += (torch.rand(self._n_depths, device=device) - 0.5) / self._n_depths
@@ -126,8 +129,8 @@ Input image size: {self._image_size}
         if is_training:
             scene_distances[-1] += torch.rand(1, device=device)[0] * (100.0 - self._max_depth)
 
-        diffracted_psf = self.psf(scene_distances, modulate_phase)
-        undiffracted_psf = self.psf(scene_distances, torch.tensor(False))
+        diffracted_psf = self.psf(scene_distances, True)
+        undiffracted_psf = self.psf(scene_distances, False)
 
         # Keep the normalization factor for penalty computation
         self._diffraction_scaler = diffracted_psf.sum(dim=(-1, -2), keepdim=True)
@@ -136,7 +139,7 @@ Input image size: {self._image_size}
         diffracted_psf = diffracted_psf / self._diffraction_scaler
         undiffracted_psf = undiffracted_psf / undiffraction_scaler
 
-        psf = \
+        self.__psf_cache = \
             self._diffraction_efficiency * diffracted_psf + \
             (1 - self._diffraction_efficiency) * undiffracted_psf
 
@@ -145,34 +148,60 @@ Input image size: {self._image_size}
             max_shift = 2
             r_shift = tuple(np.random.randint(low=-max_shift, high=max_shift, size=2))
             b_shift = tuple(np.random.randint(low=-max_shift, high=max_shift, size=2))
-            psf_r = torch.roll(psf[0], shifts=r_shift, dims=(-1, -2))
-            psf_g = psf[1]
-            psf_b = torch.roll(psf[2], shifts=b_shift, dims=(-1, -2))
-            psf = torch.stack([psf_r, psf_g, psf_b], dim=0)
+            psf_r = torch.roll(self.__psf_cache[0], shifts=r_shift, dims=(-1, -2))
+            psf_g = self.__psf_cache[1]
+            psf_b = torch.roll(self.__psf_cache[2], shifts=b_shift, dims=(-1, -2))
+            self.__psf_cache = torch.stack([psf_r, psf_g, psf_b], dim=0)
 
-        if torch.tensor(size is not None):
-            pad_h = (size[0] - self._image_size[0]) // 2
-            pad_w = (size[1] - self._image_size[1]) // 2
-            psf = functional.pad(psf, (pad_w, pad_w, pad_h, pad_h), mode='constant', value=0)
-        return psf
+        self.__psf_cache = utils.pad_or_crop(self.__psf_cache, size)
+        return self.__psf_cache
 
+    def apply_stop(self, r2, x):
+        return torch.where(r2 < self.aperture_diameter ** 2 / 4, x, torch.zeros_like(x))
+
+    def mtf_loss(self, normalize=True):
+        mtf = self.mtf
+        if normalize:
+            s = self.slope_range
+            fy = torch.linspace(-0.5, 0.5, mtf.shape[-2]).reshape(-1, 1) / self.camera_pitch
+            fx = torch.linspace(-0.5, 0.5, mtf.shape[-1]).reshape(1, -1) / self.camera_pitch
+            factor = self.aperture_diameter ** 3 / (s * torch.sqrt(fx ** 2 + fy ** 2))
+            while len(factor.shape) != len(mtf.shape):
+                factor = factor.unsqueeze(0)
+        else:
+            factor = 1
+
+        loss = factor.to(self.device) / mtf
+        return torch.sum(loss)
+
+    # logging method shuould be executed on cpu
+
+    @torch.no_grad()
     def heightmap_log(self, size):
-        heightmap = utils.img_resize(self.heightmap()[None, None, ...], size).squeeze(0)
+        heightmap = utils.img_resize(self.heightmap().cpu()[None, None, ...], size).squeeze(0)
         heightmap -= heightmap.min()
         heightmap /= heightmap.max()
         return heightmap
 
+    @torch.no_grad()
     def psf_log(self, log_size, depth_step):
         # PSF is not visualized at computed size.
-        psf = self.psf_at_camera(log_size, is_training=torch.tensor(False)).cpu()
+        psf = self.psf_at_camera(log_size, is_training=False, use_psf_cache=True).cpu()
         psf = self.normalize_psf(psf)
         psf /= psf.max()
-        streched_psf = psf \
+        streched_psf = psf / psf \
             .max(dim=-1, keepdim=True)[0] \
             .max(dim=-2, keepdim=True)[0] \
-            .max(dim=0, keepdim=True)[0]  # todo
+            .max(dim=0, keepdim=True)[0]
         return self.__make_grid(psf, depth_step), self.__make_grid(streched_psf, depth_step)
 
+    @torch.no_grad()
+    def mtf_log(self, depth_step):
+        mtf = self.mtf
+        mtf /= mtf.max()
+        return self.__make_grid(mtf, depth_step)
+
+    @torch.no_grad()
     def specific_log(self, *args, **kwargs):
         psf_loss = self.psf_out_energy(kwargs['psf_size'])
         return {
@@ -182,27 +211,48 @@ Input image size: {self._image_size}
 
     @property
     def f_number(self):
-        return self._focal_length / self._aperture_diameter
+        return self.__focal_length / self._aperture_diameter
+
+    @property
+    def sensor_distance(self):
+        return 1. / (1. / self.__focal_length - 1. / self.__focal_depth)
+
+    @property
+    def focal_depth(self):
+        return self.__focal_depth
+
+    @property
+    def focal_length(self):
+        return self.__focal_length
+
+    @property
+    def slope_range(self):
+        return 2 * (self._max_depth - self._min_depth) / (self._max_depth + self._min_depth)
 
     @property
     def aperture_pitch(self):
         return self._aperture_diameter / self._aperture_size
 
     @property
-    def sensor_distance(self):
-        return 1. / (1. / self._focal_length - 1. / self._focal_depth)
+    def camera_pitch(self):
+        return self._camera_pitch
 
     @property
     def n_wavelengths(self):
         return len(self.buf_wavelengths)
 
     @property
-    def camera_pitch(self):
-        return self._camera_pitch
-
-    @property
     def aperture_diameter(self):
         return self._aperture_diameter
+
+    @property
+    def otf(self):
+        psf = self.psf_at_camera(use_psf_cache=True)
+        return fft.fftshift(torch.rfft(psf, 2, onesided=False), (-2, -3))
+
+    @property
+    def mtf(self):
+        return old_complex.abs(self.otf)
 
     def __register_wavlength(self, wavelengths):
         if isinstance(wavelengths, tuple):
@@ -220,7 +270,8 @@ Input image size: {self._image_size}
         else:
             self.buf_wavelengths = wavelengths.to(self.buf_wavelengths.device)
 
-    def __make_grid(self, image, depth_step):
+    @staticmethod
+    def __make_grid(image, depth_step):
         # expect image with shape CxDxHxW
         return torchvision.utils.make_grid(
             image[:, ::depth_step].transpose(0, 1),

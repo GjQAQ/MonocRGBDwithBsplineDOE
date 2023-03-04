@@ -43,4 +43,20 @@ def autocorrelation2d_sym(x: torch.Tensor) -> torch.Tensor:
     return (1 - a) * (1 - b)
 
 
+# the followings are implemented by torch.* rather than torch.fft.*
+
 old_fft = __fft
+
+
+def exp2xy(amplitude, phase):
+    real = amplitude * torch.cos(phase)
+    imag = amplitude * torch.sin(phase)
+    return torch.stack([real, imag], -1)
+
+
+def old_fft_exp(amplitude, phase):
+    return __fft(exp2xy(amplitude, phase), 2)
+
+
+def old_ifft_exp(amplitude, phase):
+    return torch.ifft(exp2xy(amplitude, phase), 2)

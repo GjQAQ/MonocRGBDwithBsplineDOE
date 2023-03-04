@@ -46,14 +46,7 @@ def main(args):
     else:
         raise ValueError(f'Unrecognized dataset: {dataset}')
 
-    model = SnapshotDepth(hparams)
-    model.camera.load_state_dict(ckpt['state_dict'])
-    model.decoder.load_state_dict({
-        key[8:]: value
-        for key, value in ckpt['state_dict'].items()
-        if 'decoder' in key
-    }
-    )
+    model = SnapshotDepth.construct_from_checkpoint(ckpt)
     model = model.to(device)
     model.eval()
 

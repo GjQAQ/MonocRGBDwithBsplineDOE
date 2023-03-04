@@ -1,17 +1,14 @@
 from typing import Union, Dict
 
-import scipy.interpolate
 import torch
 from torch import Tensor
 from torch.nn.functional import interpolate
-from torchvision.utils import make_grid
 import numpy as np
 import scipy.interpolate as intp
 
 import optics
-import utils
 import utils.old_complex as old_complex
-import algorithm.fft as fft
+import utils.fft as fft
 
 
 def clamped_knot_vector(n, p):
@@ -22,10 +19,6 @@ def clamped_knot_vector(n, p):
 
 def design_matrix(x, k, p) -> np.ndarray:
     return intp.BSpline.design_matrix(x, k, p).toarray().astype('float32')
-
-
-def heightmap(u, v, c) -> Tensor:
-    return torch.matmul(torch.matmul(u, c), v.transpose(-1, -2))
 
 
 class BSplineApertureCamera(optics.Camera):
@@ -70,60 +63,72 @@ class BSplineApertureCamera(optics.Camera):
         ).item() + 1e-5)
         self.__control_points = torch.nn.Parameter(torch.zeros(grid_size), requires_grad=requires_grad)
         self.__knot_vectors = knot_vectors
-        self.__sampled_grid = [torch.tensor(1), torch.tensor(1)]
 
-        self.register_buffer('buf_u_matrix', self.__design_matrix(0))
-        self.register_buffer('buf_v_matrix', self.__design_matrix(1))
-        self.register_buffer('buf_u_grid', self.__sampled_grid[0])
-        self.register_buffer('buf_v_grid', self.__sampled_grid[1])
+        # buffered tensors used to compute heightmap in psf
+        u_mat, u_grid = self.__design_matrix(0)
+        v_mat, v_grid = self.__design_matrix(1)
+        self.register_buffer('buf_u_matrix', u_mat)
+        self.register_buffer('buf_v_matrix', v_mat)
+        self.register_buffer('buf_r_sqr', u_grid ** 2 + v_grid ** 2)
+
+        # buffered tensors used to compute heightmap in aberration
+        self.__ab_r2 = None
+        self.__ab_u_mat = None
+        self.__ab_v_mat = None
 
     def psf(self, scene_distances, modulate_phase):
-        r_sqr = self.buf_u_grid ** 2 + self.buf_v_grid ** 2  # n_wl x N_u x N_v
-        r_sqr = r_sqr.unsqueeze(1)  # n_wl x D x N_u x N_v
+        r_sqr = self.buf_r_sqr.unsqueeze(1)  # n_wl x D x N_u x N_v
         scene_distances = scene_distances.reshape(1, -1, 1, 1)
         wl = self.buf_wavelengths.reshape(-1, 1, 1, 1)
 
         item = r_sqr + scene_distances ** 2
         phase1 = torch.sqrt(item) - scene_distances
-        phase2 = torch.sqrt(r_sqr + self._focal_depth ** 2) - self._focal_depth
+        phase2 = torch.sqrt(r_sqr + self.focal_depth ** 2) - self.focal_depth
         phase = (phase1 + phase2) * (2 * np.pi / wl)
         if modulate_phase:
             phase += self.heightmap2phase(self.heightmap().unsqueeze(1), wl, self.refractive_index(wl))
 
         amplitude = scene_distances / (wl * item)
-        amplitude = torch.where(
-            torch.tensor(torch.sqrt(r_sqr) < self._aperture_diameter / 2),
-            amplitude,
-            torch.zeros_like(amplitude)
-        )
+        amplitude = self.apply_stop(r_sqr, amplitude)
         amplitude = amplitude / amplitude.max()
-        real = amplitude * torch.cos(phase)
-        imag = amplitude * torch.sin(phase)
-        origin = torch.stack([real, imag], -1)
 
-        psf = old_complex.abs2(fft.old_fft(origin, 2))
+        psf = old_complex.abs2(fft.old_fft_exp(amplitude, phase))
         psf = interpolate(psf, self._image_size)
         psf /= (wl * self.sensor_distance) ** 2
-        return fft.fftshift(psf, dims=(-1, -2))
+        return fft.fftshift(psf, (-1, -2))
 
     def psf_out_energy(self, psf_size: int):
         return 0, 0  # todo
 
     def heightmap(self):
-        return heightmap(
+        return self.__heightmap(
             self.buf_u_matrix,
             self.buf_v_matrix,
             self.__control_points.unsqueeze(0)
         )  # n_wl x N_u x N_v
 
-    def aberration(self, u, v, wavelength=None):
-        # todo
+    def aberration(self, u, v, wavelength: float = None, use_buffer: bool = True):
         if wavelength is None:
             wavelength = self.buf_wavelengths[len(self.buf_wavelengths) / 2]
-        u, v = self.__scale_uv(u, v, wavelength)
-        u_vec = intp.BSpline.design_matrix(u, self.__knot_vectors[0], self.__degrees[0]).toarray()
-        v_vec = intp.BSpline.design_matrix(v, self.__knot_vectors[1], self.__degrees[1]).toarray()
-        v_vec = np.transpose(v_vec)
+        c = self.__control_points.cpu()[None, None, ...]
+
+        if use_buffer and self.__ab_r2 is not None:
+            h = self.__heightmap(self.__ab_u_mat, self.__ab_v_mat, c)
+            r2 = self.__ab_r2
+        else:
+            r2 = u ** 2 + v ** 2
+            u = self.__scale_coordinate(u).squeeze(-2)  # 1 x omega_x x t1
+            v = self.__scale_coordinate(v).squeeze(-1)  # omega_y x 1 x t2
+            u_mat = self.__design_matrices(u, c.shape[-2], self.__knot_vectors[0], self.__degrees[0])
+            v_mat = self.__design_matrices(v, c.shape[-1], self.__knot_vectors[1], self.__degrees[1])
+            h = self.__heightmap(u_mat, v_mat, c)
+
+            self.__ab_r2 = r2
+            self.__ab_u_mat = u_mat
+            self.__ab_v_mat = v_mat
+
+        phase = self.heightmap2phase(h, wavelength, self.refractive_index(wavelength))
+        return self.apply_stop(torch.stack([r2, r2], -1), fft.exp2xy(1, phase))
 
     def heightmap_log(self, size):
         m = []
@@ -132,7 +137,7 @@ class BSplineApertureCamera(optics.Camera):
             axis.append(torch.linspace(0, 1, sz))
             m.append(torch.from_numpy(design_matrix(axis[-1], kv, p)))
 
-        h = heightmap(*m, self.__control_points.cpu())
+        h = self.__heightmap(*m, self.__control_points.cpu())
         h -= h.min()
         h /= h.max()
 
@@ -149,20 +154,34 @@ class BSplineApertureCamera(optics.Camera):
     def device(self):
         return self.__control_points.device
 
-    def __scale_uv(self, u, v, wavelength):
-        _range = wavelength * self.sensor_distance / self.camera_pitch
-        return u / _range + 0.5, v / _range + 0.5
+    def __scale_coordinate(self, x):
+        x = x / self.aperture_diameter + 0.5
+        return torch.clamp(x, 0, 1)
 
     def __design_matrix(self, dim):
         n, kv, p = self._image_size[dim], self.__knot_vectors[dim], self.__degrees[dim]
         interval = self.buf_wavelengths.numpy() * self.sensor_distance / (self.camera_pitch * n)
         n *= self.__scale_factor
 
-        x = np.linspace(-n / 2, n / 2, n).reshape((1, -1)) * interval.reshape((-1, 1))  # n_wl x N
-        x = x.astype('float32')
-        self.__sampled_grid[dim] = torch.from_numpy(x[:, None, :] if dim == 0 else x[:, :, None])
+        x = torch.linspace(-n / 2, n / 2, n).reshape((1, -1)) * interval.reshape((-1, 1))  # n_wl x N
+        grid = x[:, None, :] if dim == 0 else x[:, :, None]
 
-        x = x / self.aperture_diameter + 0.5
-        x = np.clip(x, 0, 1)
-        m = np.stack([design_matrix(x[i], kv, p) for i in range(x.shape[0])])
-        return torch.from_numpy(m.astype('float32'))  # n_wl x N x n_ctrl
+        x = self.__scale_coordinate(x)
+        m = torch.stack([torch.from_numpy(design_matrix(x[i].numpy(), kv, p)) for i in range(x.shape[0])])
+        return m, grid  # n_wl x N x n_ctrl, n_wl x * x *
+
+    @staticmethod
+    def __heightmap(u, v, c) -> Tensor:
+        return torch.matmul(torch.matmul(u, c), v.transpose(-1, -2))
+
+    @staticmethod
+    def __design_matrices(x, c_n, kv, p):
+        mat = torch.zeros(*x.shape, c_n)
+
+        unravel_shape = (-1, x.shape[-1], c_n)
+        shape = x.shape
+        mat = mat.reshape(*unravel_shape)
+        x = x.reshape(-1, x.shape[-1])
+        for i in range(unravel_shape[0]):
+            mat[i] = torch.from_numpy(design_matrix(x[i].numpy(), kv, p))
+        return mat.reshape(*shape, c_n)

@@ -1,8 +1,9 @@
 import torch
-import torch.fft as fft
 
-import algorithm.fft as myfft
+import utils.fft as myfft
 import utils
+
+import torch.fft as fft
 
 
 def __edgetaper3d(img: torch.Tensor, psf: torch.Tensor) -> torch.Tensor:

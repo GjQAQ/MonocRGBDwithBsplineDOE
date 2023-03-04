@@ -1,7 +1,11 @@
-from typing import Callable, Tuple, Iterable, Union
+from typing import Callable, Tuple, Iterable
 
 import numpy as np
-from scipy.fft import ifft2, fftshift
+import torch
+from scipy.fft import ifft2
+
+import utils.fft as fft
+import utils.old_complex as old_complex
 
 
 def kernel_spectrum(
@@ -13,12 +17,13 @@ def kernel_spectrum(
     y_frequency: Iterable[float] = None,
     grid_size: Tuple[int, int] = (512, 512),
     show_size: Tuple[int, int] = None,
-    show_xi: bool = False
-) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+    show_xi: bool = False,
+    stretch: Callable = None
+):
     if x_frequency is None:
-        x_frequency = np.linspace(-max_frequency[0], max_frequency[0], 5) / 2
+        x_frequency = torch.linspace(-1, 1, 5) * (max_frequency[0] / 2)
     if y_frequency is None:
-        y_frequency = np.linspace(-max_frequency[1], max_frequency[1], 5) / 2
+        y_frequency = torch.linspace(-1, 1, 5) * (max_frequency[1] / 2)
 
     if show_size is None:
         show_size = grid_size
@@ -30,26 +35,27 @@ def kernel_spectrum(
     t = []
     for d, n in zip(dt, grid_size):
         t.append(np.linspace(-n, n, n) * (d / 2))
-    t1, t2 = np.meshgrid(*t)
-    t2 = np.flipud(t2)
-    t1 = t1[None, None, ...]
-    t2 = t2[None, None, ...]
+    t1 = (torch.linspace(-1, 1, grid_size[0]) * (grid_size[0] * dt[0] / 2)).reshape(1, 1, 1, -1)
+    t2 = (torch.linspace(-1, 1, grid_size[1]) * (grid_size[1] * dt[1] / 2)).reshape(1, 1, -1, 1)
+    t2 = torch.flip(t2, (2,))
 
     rho = wavelength * focal_depth
-    u, v = np.meshgrid(x_frequency * rho, y_frequency * rho)
-    v = np.flipud(v)
-    u = u[..., None, None]
-    v = v[..., None, None]
+    u = (x_frequency * rho).reshape(1, -1, 1, 1)
+    v = (y_frequency * rho).reshape(-1, 1, 1, 1)
+    v = torch.flip(v, (0,))
 
     phi1, phi2 = phi(t1 + u / 2, t2 + v / 2), phi(t1 - u / 2, t2 - v / 2)
-    xi = phi1 * np.conj(phi2)
+    xi = old_complex.multiply(phi1, old_complex.conj(phi2))
 
-    res = fftshift(ifft2(xi), (-1, -2))
+    res = fft.fftshift(old_complex.abs2(torch.ifft(xi, 2)))
     if c1 != 0 and c2 != 0:
         res = res[..., c1:-c1, c2:-c2]
-    res = np.abs(res)
-    res /= np.max(res)
+    res = torch.sqrt(res)
+    res /= torch.max(res)
+    if stretch is not None:
+        res = stretch(res)
+
     if show_xi:
-        return res, np.abs(xi),
+        return res, old_complex.abs(xi),
     else:
         return res

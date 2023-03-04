@@ -7,7 +7,6 @@ import pytorch_lightning as pl
 import pytorch_lightning.metrics.regression as regression
 import torch
 import torch.optim as optim
-import torch.nn.functional as functional
 import torchvision.transforms
 import torchvision.utils
 import debayer
@@ -16,7 +15,6 @@ from reconstruction.reconstructor import Reconstructor
 from .vgg16loss import Vgg16PerceptualLoss
 import dataset
 import utils
-import algorithm.fft as fft
 import algorithm.inverse as inverse
 import optics.bsac as bsac
 import optics.rsc as rsc
@@ -43,9 +41,7 @@ class SnapshotDepth(pl.LightningModule):
         self.hparams = hparams
         self.save_hyperparameters(self.hparams)
 
-        self.__build_model()
-
-        self.metrics = {
+        self.__metrics = {
             'depth_loss': regression.MeanAbsoluteError(),
             'image_loss': regression.MeanAbsoluteError(),
             'mae_depthmap': regression.MeanAbsoluteError(),
@@ -54,6 +50,14 @@ class SnapshotDepth(pl.LightningModule):
             'mse_image': regression.MeanSquaredError(),
             'vgg_image': regression.MeanSquaredError(),
         }
+        self.__loss_weights = [
+            hparams.depth_loss_weight,
+            hparams.image_loss_weight,
+            hparams.psf_expansion_loss_weight,
+            hparams.mtf_loss_weight
+        ]
+
+        self.__build_model()
 
         self.log_dir = log_dir
 
@@ -123,30 +127,30 @@ class SnapshotDepth(pl.LightningModule):
 
         img_pair = (output.est_img, output.target_img)
         depthmap_pair = (output.est_depthmap, output.target_depthmap)
-        for item, loss in self.metrics.items():
+        for item, loss in self.__metrics.items():
             if item.endswith('depthmap'):
                 loss(*depthmap_pair)
                 self.log(f'validation/{item}', loss, on_step=False, on_epoch=True)
             elif item.endswith('img'):
                 loss(*img_pair)
                 self.log(f'validation/{item}', loss, on_step=False, on_epoch=True)
-        self.metrics['vgg_image'](*img_pair)
+        self.__metrics['vgg_image'](*img_pair)
 
         if batch_idx == 0:
             self.__log_images(output, 'validation')
 
     def on_validation_epoch_start(self) -> None:
-        for metric in self.metrics.values():
+        for metric in self.__metrics.values():
             metric.reset()
             metric.to(self.device)
 
     def validation_epoch_end(self, outputs):
         val_loss = self.__combine_loss(
-            self.metrics['mae_depthmap'].compute(),
-            self.metrics['vgg_image'].compute(),
+            self.__metrics['mae_depthmap'].compute(),
+            self.__metrics['vgg_image'].compute(),
             0.
         )
-        self.log('val_loss', val_loss)
+        self.log('validation/val_loss', val_loss)
 
     def forward(self, img, depthmap, is_testing):
         # invert the gamma correction for sRGB image
@@ -159,7 +163,7 @@ class SnapshotDepth(pl.LightningModule):
                 img_linear, depthmap, self.hparams.occlusion, torch.tensor(True)
             )
             # We don't want to use the jittered PSF for the pseudo inverse.
-            psf = self.camera.psf_at_camera(is_training=torch.tensor(False)).unsqueeze(0)
+            psf = self.camera.psf_at_camera().unsqueeze(0)
         else:
             captimgs, target_volumes, psf = self.camera.forward(
                 img_linear, depthmap, self.hparams.occlusion
@@ -230,17 +234,20 @@ class SnapshotDepth(pl.LightningModule):
             'focal_length': hparams.focal_length,
             'aperture_diameter': hparams.focal_length / hparams.f_number,
             'aperture_size': hparams.mask_sz,
-            'diffraction_efficiency': hparams.diffraction_efficiency
+            'diffraction_efficiency': hparams.diffraction_efficiency,
+            "requires_grad": hparams.optimize_optics
         }
         if hparams.camera_type == 'b-spline':
-            self.camera = bsac.BSplineApertureCamera(**camera_recipe, requires_grad=hparams.optimize_optics)
+            camera_recipe.update({
+                "degrees": (hparams.bspline_degree, hparams.bspline_degree)
+            })
+            self.camera = bsac.BSplineApertureCamera(**camera_recipe)
         elif hparams.camera_type == 'rotationally-symmetric' or hparams.camera_type == 'mixed':
-            extra = {
+            camera_recipe.update({
                 'full_size': hparams.full_size,
                 'aperture_upsample_factor': hparams.mask_upsample_factor
-            }
-            camera_recipe.update(extra)
-            self.camera = rsc.RotationallySymmetricCamera(**camera_recipe, requires_grad=hparams.optimize_optics)
+            })
+            self.camera = rsc.RotationallySymmetricCamera(**camera_recipe)
 
         self.decoder = Reconstructor(
             hparams.preinverse, hparams.n_depths, hparams.model_base_ch
@@ -275,37 +282,31 @@ class SnapshotDepth(pl.LightningModule):
             output.est_depthmap * depth_conf, output.target_depthmap * depth_conf
         )
         image_loss = self.image_lossfn.train_loss(output.est_img, output.target_img)
-
         psf_out_of_fov_sum, psf_out_of_fov_max = self.camera.psf_out_energy(hparams.psf_size)
-        psf_loss = psf_out_of_fov_sum
+        mtf_loss = self.camera.mtf_loss()
 
-        total_loss = self.__combine_loss(depth_loss, image_loss, psf_loss)
+        total_loss = self.__combine_loss(depth_loss, image_loss, psf_out_of_fov_sum, mtf_loss)
         logs = {
             'total_loss': total_loss,
             'depth_loss': depth_loss,
             'image_loss': image_loss,
-            'psf_loss': psf_loss,
-            'psf_out_of_fov_max': psf_out_of_fov_max,
+            'psf_expansion_loss': psf_out_of_fov_sum,
+            'mtf_loss': mtf_loss
         }
         return total_loss, logs
 
-    def __combine_loss(self, depth_loss, image_loss, psf_loss):
-        return self.hparams.depth_loss_weight * depth_loss + \
-            self.hparams.image_loss_weight * image_loss + \
-            self.hparams.psf_loss_weight * psf_loss
+    def __combine_loss(self, *loss_items):
+        return sum([weight * loss for weight, loss in zip(self.__loss_weights, loss_items)])
 
     @torch.no_grad()
     def __log_images(self, output: FinalOutput, tag: str):
-        content = self.__generate_image_log(
-            output,
-            tag,
-            self.hparams.optimize_optics or self.global_step == 0
-        )
+        log_option = self.hparams.optimize_optics or self.global_step == 0
+        content = self.__generate_image_log(output, tag, log_option, log_option)
         for k, v in content.items():
             self.logger.experiment.add_image(k, v, self.global_step, dataformats='CHW')
 
     @torch.no_grad()
-    def __generate_image_log(self, output: FinalOutput, tag: str, log_psf: bool):
+    def __generate_image_log(self, output: FinalOutput, tag: str, log_psf: bool, log_mtf: bool):
         # Unpack outputs
         res = {}
 
@@ -327,10 +328,13 @@ class SnapshotDepth(pl.LightningModule):
         res[f'{tag}/summary'] = grid_summary
 
         if log_psf:
-            psf = self.camera.psf_log((128, 128), self.hparams.summary_depth_every)
+            psf = self.camera.psf_log([self.hparams.psf_size] * 2, self.hparams.summary_depth_every)
             res['optics/psf'] = psf[0]
             res['optics/psf_stretched'] = psf[1]
             res['optics/heightmap'] = self.camera.heightmap_log([self.hparams.summary_mask_sz] * 2)
+
+        if log_mtf:
+            res['optics/mtf'] = self.camera.mtf_log(self.hparams.summary_depth_every)
 
         return res
 
@@ -357,6 +361,18 @@ class SnapshotDepth(pl.LightningModule):
             parser.add_argument(f'--{k}', **v)
 
         return parser
+
+    @staticmethod
+    def construct_from_checkpoint(ckpt):
+        hparams = ckpt['hyper_parameters']
+        model = SnapshotDepth(hparams)
+        model.camera.load_state_dict(ckpt['state_dict'])
+        model.decoder.load_state_dict({
+            key[8:]: value
+            for key, value in ckpt['state_dict'].items()
+            if 'decoder' in key
+        })
+        return model
 
     @staticmethod
     def __argconfig_parse_flag(flags: dict, parser: argparse.ArgumentParser):

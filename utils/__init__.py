@@ -22,6 +22,14 @@ def crop_boundary(x, w):
         return x[..., w:-w, w:-w]
 
 
+def pad_or_crop(x, target):
+    if target is None:
+        return x
+    pad_h = (target[0] - x.shape[-2]) // 2
+    pad_w = (target[1] - x.shape[-1]) // 2
+    return torch.nn.functional.pad(x, (pad_w, pad_w, pad_h, pad_h), mode='constant', value=0)
+
+
 def img_resize(img, size):
     return torch.nn.functional.interpolate(img, size=size)
 

@@ -43,15 +43,7 @@ def main(args):
     # My code cleanup made it difficult to directly load the checkpoint from what I used for the paper.
     # So, manually loading the learnable parameters to the model.
     ckpt = torch.load(args.ckpt_path, map_location=lambda storage, loc: storage)
-    hparams = ckpt['hyper_parameters']
-    model = SnapshotDepth(hparams)
-
-    model.camera.load_state_dict(ckpt['state_dict'])
-    model.decoder.load_state_dict({
-        key[8:]: value
-        for key, value in ckpt['state_dict'].items()
-        if 'decoder' in key
-    })
+    model = SnapshotDepth.construct_from_checkpoint(ckpt)
     model = model.to(device)
     model.eval()
 

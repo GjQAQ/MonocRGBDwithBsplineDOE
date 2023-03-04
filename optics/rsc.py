@@ -229,8 +229,8 @@ class RotationallySymmetricCamera(optics.Camera):
         amplitude /= amplitude.max()
         # zero phase at center
         phase = wave_number * (radius - scene_distances)  # n_wl x D x n_r
-        if not math.isinf(self._focal_depth):
-            focal_depth = torch.tensor(self._focal_depth, device=device).reshape(1, 1, 1).double()  # 1 x 1 x 1
+        if not math.isinf(self.focal_depth):
+            focal_depth = torch.tensor(self.focal_depth, device=device).reshape(1, 1, 1).double()  # 1 x 1 x 1
             f_radius = torch.sqrt(focal_depth ** 2 + r ** 2)  # 1 x 1 x n_r
             phase -= wave_number * (f_radius - focal_depth)  # subtract focal_depth to roughly remove a piston
         return amplitude, phase

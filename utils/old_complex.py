@@ -15,7 +15,7 @@ def conj(x):
 
 def ones(shape, dtype=torch.float32, device=torch.device('cpu')):
     return torch.stack([torch.ones(shape, dtype=dtype, device=device),
-                        torch.zeros(shape, dtype=dtype, device=device)], dim=-1)
+        torch.zeros(shape, dtype=dtype, device=device)], dim=-1)
 
 
 def eye(K):
@@ -24,6 +24,10 @@ def eye(K):
 
 def abs2(x):
     return x[..., -1] ** 2 + x[..., -2] ** 2
+
+
+def abs(x):
+    return torch.sqrt(abs2(x))
 
 
 def multiply(x, y):

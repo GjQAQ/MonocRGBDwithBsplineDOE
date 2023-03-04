@@ -53,7 +53,11 @@
     "type": "float",
     "default": 1
   },
-  "psf_loss_weight": {
+  "psf_expansion_loss_weight": {
+    "type": "float",
+    "default": 1
+  },
+  "mtf_loss_weight": {
     "type": "float",
     "default": 1
   },
@@ -90,6 +94,10 @@
   "model_base_ch": {
     "type": "int",
     "default": 32
+  },
+  "bspline_degree": {
+    "type": "int",
+    "default": 5
   },
 
   "camera_type": {
