@@ -1,5 +1,4 @@
 from typing import Union, Dict
-
 import math
 
 import torch
@@ -45,7 +44,7 @@ class RotationallySymmetricCamera(optics.Camera):
 
         self.__heightmap1d = torch.nn.Parameter(init_heightmap1d, requires_grad=requires_grad)
         self.__aperture_upsample_factor = aperture_upsample_factor
-        self.__full_size = self.normalize_image_size(full_size)
+        self.__full_size = self.regularize_image_size(full_size)
 
         self.__rho_sampling_full = None
         self.__ind_full = None
@@ -57,8 +56,7 @@ class RotationallySymmetricCamera(optics.Camera):
         psf1d = self.__psf1d(self.buf_h, scene_distances, modulate_phase)
         psf_rd = functional.relu(cubic.interp(
             self.buf_rho_grid, psf1d, self.buf_rho_sampling, self.buf_ind
-        ).float()
-        )
+        ).float())
         psf_rd = psf_rd.reshape(
             self.n_wavelengths, self._n_depths,
             self._image_size[0] // 2, self._image_size[1] // 2
@@ -87,8 +85,7 @@ class RotationallySymmetricCamera(optics.Camera):
         heightmap1d = torch.cat([
             self.heightmap1d.cpu(),
             torch.zeros((self._aperture_size // 2))
-        ], dim=0
-        )
+        ], dim=0)
         heightmap1d = heightmap1d.reshape(1, 1, -1)
         r_grid = torch.arange(0, self._aperture_size, dtype=torch.double).reshape(1, -1)
         y_coord = torch.arange(0, self._aperture_size // 2, dtype=torch.double).reshape(-1, 1) + 0.5
@@ -98,17 +95,23 @@ class RotationallySymmetricCamera(optics.Camera):
         heightmap11 = cubic.interp(r_grid, heightmap1d, r_coord, ind).float()
         return _copy_quadruple(heightmap11).squeeze()
 
+    def aberration(self, u, v, wavelength=None):
+        pass
+
+    def feature_parameters(self):
+        return {'heightmap1d': self.__heightmap1d.data}
+
+    def mtf_loss(self, bounded=True, normalized=True):
+        return 0  # todo
+
     def specific_log(self, *args, **kwargs):
         log = super().specific_log(*args, **kwargs)
         log['optics/heightmap_max'] = self.heightmap1d.max()
         log['optics/heightmap_min'] = self.heightmap1d.min()
         return log
 
-    def forward(self, img, depthmap, occlusion, is_training=torch.tensor(False)):
-        return super().forward(img, depthmap, occlusion, is_training)
-
     def load_state_dict(self, state_dict: Union[Dict[str, Tensor], Dict[str, Tensor]], strict: bool = True):
-        self.__heightmap1d.data = state_dict['camera._RotationallySymmetricCamera__heightmap1d']
+        self.__heightmap1d.data = state_dict['heightmap1d']
 
     @property
     def heightmap1d(self):
@@ -122,10 +125,6 @@ class RotationallySymmetricCamera(optics.Camera):
     def original_heightmap1d(self):
         return self.__heightmap1d
 
-    @property
-    def device(self):
-        return self.buf_h.device
-
     def __build_camera(self):
         h, rho_grid, rho_sampling = self.__precompute_h(self._image_size)
         ind = _find_index(rho_grid, rho_sampling)
@@ -137,14 +136,12 @@ class RotationallySymmetricCamera(optics.Camera):
             raise RuntimeError('Grid (max): {}, Sampling (max): {}'.format(
                 rho_grid.max(dim=-1)[0],
                 rho_sampling.reshape(self.n_wavelengths, -1).max(dim=-1)[0]
-            )
-            )
+            ))
         if not (rho_grid.min(dim=-1)[0] <= rho_sampling.reshape(self.n_wavelengths, -1).min(dim=-1)[0]).all():
             raise RuntimeError('Grid (min): {}, Sampling (min): {}'.format(
                 rho_grid.min(dim=-1)[0],
                 rho_sampling.reshape(self.n_wavelengths, -1).min(dim=-1)[0]
-            )
-            )
+            ))
 
         self.register_buffer('buf_h', h)
         self.register_buffer('buf_rho_grid', rho_grid)

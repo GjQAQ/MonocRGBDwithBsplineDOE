@@ -1,3 +1,4 @@
 .idea
 read_nohupout.py
 spectrum_test.py
+*.sh

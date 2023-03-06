@@ -91,7 +91,7 @@ def main(args):
 
     captimg_linear = captimg_linear.to(device)
 
-    psf = model.camera.normalize_psf(model.camera.psf_at_camera(image_sz).unsqueeze(0))
+    psf = model.camera.normalize(model.camera.psf_at_camera(image_sz).unsqueeze(0))
     psf_cropped = utils.crop_psf(psf, image_sz)
     pinv_volumes = tikhonov_inverse(captimg_linear, psf_cropped, model.hparams.reg_tikhonov)
     model_outputs = model.decoder(captimg_linear, pinv_volumes)

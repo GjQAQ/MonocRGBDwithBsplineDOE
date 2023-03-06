@@ -1,5 +1,4 @@
 import abc
-
 import math
 import typing
 
@@ -47,7 +46,8 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
         aperture_diameter: float,
         camera_pitch: float,
         wavelengths=(632e-9, 550e-9, 450e-9),
-        diffraction_efficiency=0.7
+        diffraction_efficiency=0.7,
+        loss_items: typing.Tuple[str] = ()
     ):
         super().__init__()
         if min_depth < 1e-6:
@@ -65,14 +65,21 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
         self._aperture_diameter = aperture_diameter
         self._camera_pitch = camera_pitch
         self.__focal_length = focal_length
-        self._image_size = self.normalize_image_size(image_size)
+        self._image_size = self.regularize_image_size(image_size)
         self._aperture_size = aperture_size
-
-        self._diffraction_scaler = None
+        self.__loss_items = loss_items
 
         self.__register_wavlength(wavelengths)
         self.register_buffer('buf_scene_distances', scene_distances)
 
+        if 'mtf' in loss_items:
+            s = self.slope_range
+            fy = torch.linspace(-0.5, 0.5, self._image_size[-2]).reshape(-1, 1) / self.camera_pitch
+            fx = torch.linspace(-0.5, 0.5, self._image_size[-1]).reshape(1, -1) / self.camera_pitch
+            mtf_bound = self.aperture_diameter ** 3 / (s * torch.sqrt(fx ** 2 + fy ** 2))
+            self.register_buffer('buf_mtf_bound', mtf_bound)
+
+        self._diffraction_scaler = None
         self.__psf_cache = None
 
     @abc.abstractmethod
@@ -91,6 +98,10 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
     def aberration(self, u, v, wavelength=None):
         pass
 
+    @abc.abstractmethod
+    def feature_parameters(self):
+        pass
+
     def extra_repr(self):
         return f'''
 Camera module...
@@ -103,7 +114,7 @@ Input image size: {self._image_size}
 
     def forward(self, img, depthmap, occlusion, is_training=False):
         psf = self.psf_at_camera(img.shape[-2:], is_training=is_training).unsqueeze(0)
-        psf = self.normalize_psf(psf)
+        psf = self.normalize(psf)
         captimg, volume = self.get_capt_img(img, depthmap, psf, occlusion)
         return captimg, volume, psf
 
@@ -122,6 +133,7 @@ Input image size: {self._image_size}
             return utils.pad_or_crop(self.__psf_cache, size)
 
         device = self.device
+        is_training = False
         init_sd = torch.linspace(0, 1, steps=self._n_depths, device=device)
         if is_training:
             init_sd += (torch.rand(self._n_depths, device=device) - 0.5) / self._n_depths
@@ -130,18 +142,12 @@ Input image size: {self._image_size}
             scene_distances[-1] += torch.rand(1, device=device)[0] * (100.0 - self._max_depth)
 
         diffracted_psf = self.psf(scene_distances, True)
-        undiffracted_psf = self.psf(scene_distances, False)
-
         # Keep the normalization factor for penalty computation
         self._diffraction_scaler = diffracted_psf.sum(dim=(-1, -2), keepdim=True)
-        undiffraction_scaler = undiffracted_psf.sum(dim=(-1, -2), keepdim=True)
-
         diffracted_psf = diffracted_psf / self._diffraction_scaler
-        undiffracted_psf = undiffracted_psf / undiffraction_scaler
-
         self.__psf_cache = \
             self._diffraction_efficiency * diffracted_psf + \
-            (1 - self._diffraction_efficiency) * undiffracted_psf
+            (1 - self._diffraction_efficiency) * self.__undiffracted_psf()
 
         # In training, randomly pixel-shifts the PSF around green channel.
         if is_training:
@@ -159,19 +165,22 @@ Input image size: {self._image_size}
     def apply_stop(self, r2, x):
         return torch.where(r2 < self.aperture_diameter ** 2 / 4, x, torch.zeros_like(x))
 
-    def mtf_loss(self, normalize=True):
+    def mtf_loss(self, bounded=True, normalized=True):
+        if 'mtf' not in self.__loss_items:
+            return 0
+
         mtf = self.mtf
-        if normalize:
-            s = self.slope_range
-            fy = torch.linspace(-0.5, 0.5, mtf.shape[-2]).reshape(-1, 1) / self.camera_pitch
-            fx = torch.linspace(-0.5, 0.5, mtf.shape[-1]).reshape(1, -1) / self.camera_pitch
-            factor = self.aperture_diameter ** 3 / (s * torch.sqrt(fx ** 2 + fy ** 2))
+        if normalized:
+            mtf = self.normalize(mtf)
+        if bounded:
+            factor = self.buf_mtf_bound
             while len(factor.shape) != len(mtf.shape):
                 factor = factor.unsqueeze(0)
         else:
             factor = 1
 
-        loss = factor.to(self.device) / mtf
+        loss = factor / mtf
+        loss[torch.isinf(loss)] = 0
         return torch.sum(loss)
 
     # logging method shuould be executed on cpu
@@ -187,7 +196,7 @@ Input image size: {self._image_size}
     def psf_log(self, log_size, depth_step):
         # PSF is not visualized at computed size.
         psf = self.psf_at_camera(log_size, is_training=False, use_psf_cache=True).cpu()
-        psf = self.normalize_psf(psf)
+        psf = self.normalize(psf)
         psf /= psf.max()
         streched_psf = psf / psf \
             .max(dim=-1, keepdim=True)[0] \
@@ -254,6 +263,14 @@ Input image size: {self._image_size}
     def mtf(self):
         return old_complex.abs(self.otf)
 
+    @property
+    def device(self):
+        return self.buf_wavelengths.device
+
+    @property
+    def loss_items(self):
+        return self.__loss_items
+
     def __register_wavlength(self, wavelengths):
         if isinstance(wavelengths, tuple):
             wavelengths = torch.tensor(wavelengths)
@@ -270,6 +287,13 @@ Input image size: {self._image_size}
         else:
             self.buf_wavelengths = wavelengths.to(self.buf_wavelengths.device)
 
+    @torch.no_grad()
+    def __undiffracted_psf(self):
+        if not hasattr(self, 'buf_undiffracted_psf'):
+            self.register_buffer('buf_undiffracted_psf', self.psf(self.buf_scene_distances, False))
+            self.buf_undiffracted_psf /= self.buf_undiffracted_psf.sum(dim=(-1, -2), keepdim=True)
+        return self.buf_undiffracted_psf
+
     @staticmethod
     def __make_grid(image, depth_step):
         # expect image with shape CxDxHxW
@@ -279,11 +303,11 @@ Input image size: {self._image_size}
         )
 
     @staticmethod
-    def normalize_psf(psf):
+    def normalize(psf):
         return psf / psf.sum(dim=(-2, -1), keepdims=True)
 
     @staticmethod
-    def normalize_image_size(img_sz):
+    def regularize_image_size(img_sz):
         if isinstance(img_sz, int):
             img_sz = [img_sz, img_sz]
         elif isinstance(img_sz, list):

@@ -6,7 +6,7 @@ from torch.nn.functional import interpolate
 import numpy as np
 import scipy.interpolate as intp
 
-import optics
+import optics.classic
 import utils.old_complex as old_complex
 import utils.fft as fft
 
@@ -21,7 +21,7 @@ def design_matrix(x, k, p) -> np.ndarray:
     return intp.BSpline.design_matrix(x, k, p).toarray().astype('float32')
 
 
-class BSplineApertureCamera(optics.Camera):
+class BSplineApertureCamera(optics.classic.ClassicCamera):
     def __init__(
         self,
         grid_size=None,
@@ -46,7 +46,7 @@ class BSplineApertureCamera(optics.Camera):
         :param requires_grad:
         :param kwargs:
         """
-        super().__init__(**kwargs)
+        super().__init__(double_precision=False, **kwargs)
 
         if grid_size is None:
             grid_size = (kwargs['aperture_size'], kwargs['aperture_size'])
@@ -57,45 +57,17 @@ class BSplineApertureCamera(optics.Camera):
         else:
             self.__degrees = (len(knot_vectors[0]) - grid_size[0] - 1, len(knot_vectors[1]) - grid_size[1] - 1,)
 
-        const = self.camera_pitch / self.sensor_distance
-        self.__scale_factor = int(torch.ceil(
-            const * self.aperture_diameter / torch.min(self.buf_wavelengths)
-        ).item() + 1e-5)
         self.__control_points = torch.nn.Parameter(torch.zeros(grid_size), requires_grad=requires_grad)
         self.__knot_vectors = knot_vectors
 
         # buffered tensors used to compute heightmap in psf
-        u_mat, u_grid = self.__design_matrix(0)
-        v_mat, v_grid = self.__design_matrix(1)
-        self.register_buffer('buf_u_matrix', u_mat)
-        self.register_buffer('buf_v_matrix', v_mat)
-        self.register_buffer('buf_r_sqr', u_grid ** 2 + v_grid ** 2)
+        self.register_buffer('buf_u_matrix', self.__design_matrix(1))
+        self.register_buffer('buf_v_matrix', self.__design_matrix(0))
 
         # buffered tensors used to compute heightmap in aberration
         self.__ab_r2 = None
         self.__ab_u_mat = None
         self.__ab_v_mat = None
-
-    def psf(self, scene_distances, modulate_phase):
-        r_sqr = self.buf_r_sqr.unsqueeze(1)  # n_wl x D x N_u x N_v
-        scene_distances = scene_distances.reshape(1, -1, 1, 1)
-        wl = self.buf_wavelengths.reshape(-1, 1, 1, 1)
-
-        item = r_sqr + scene_distances ** 2
-        phase1 = torch.sqrt(item) - scene_distances
-        phase2 = torch.sqrt(r_sqr + self.focal_depth ** 2) - self.focal_depth
-        phase = (phase1 + phase2) * (2 * np.pi / wl)
-        if modulate_phase:
-            phase += self.heightmap2phase(self.heightmap().unsqueeze(1), wl, self.refractive_index(wl))
-
-        amplitude = scene_distances / (wl * item)
-        amplitude = self.apply_stop(r_sqr, amplitude)
-        amplitude = amplitude / amplitude.max()
-
-        psf = old_complex.abs2(fft.old_fft_exp(amplitude, phase))
-        psf = interpolate(psf, self._image_size)
-        psf /= (wl * self.sensor_distance) ** 2
-        return fft.fftshift(psf, (-1, -2))
 
     def psf_out_energy(self, psf_size: int):
         return 0, 0  # todo
@@ -130,6 +102,7 @@ class BSplineApertureCamera(optics.Camera):
         phase = self.heightmap2phase(h, wavelength, self.refractive_index(wavelength))
         return self.apply_stop(torch.stack([r2, r2], -1), fft.exp2xy(1, phase))
 
+    @torch.no_grad()
     def heightmap_log(self, size):
         m = []
         axis = []
@@ -147,12 +120,11 @@ class BSplineApertureCamera(optics.Camera):
             h, torch.zeros_like(h)
         ).unsqueeze(0)
 
-    def load_state_dict(self, state_dict: Union[Dict[str, Tensor], Dict[str, Tensor]], strict: bool = True):
-        self.__control_points.data = state_dict['camera._BSplineApertureCamera__control_points']
+    def feature_parameters(self):
+        return {'control_points': self.__control_points.data}
 
-    @property
-    def device(self):
-        return self.__control_points.device
+    def load_state_dict(self, state_dict: Union[Dict[str, Tensor], Dict[str, Tensor]], strict: bool = True):
+        self.__control_points.data = state_dict['control_points']
 
     def __scale_coordinate(self, x):
         x = x / self.aperture_diameter + 0.5
@@ -160,15 +132,11 @@ class BSplineApertureCamera(optics.Camera):
 
     def __design_matrix(self, dim):
         n, kv, p = self._image_size[dim], self.__knot_vectors[dim], self.__degrees[dim]
-        interval = self.buf_wavelengths.numpy() * self.sensor_distance / (self.camera_pitch * n)
-        n *= self.__scale_factor
-
-        x = torch.linspace(-n / 2, n / 2, n).reshape((1, -1)) * interval.reshape((-1, 1))  # n_wl x N
-        grid = x[:, None, :] if dim == 0 else x[:, :, None]
+        x = torch.flatten(self.u_axis if dim == 1 else self.v_axis, -2, -1)
 
         x = self.__scale_coordinate(x)
         m = torch.stack([torch.from_numpy(design_matrix(x[i].numpy(), kv, p)) for i in range(x.shape[0])])
-        return m, grid  # n_wl x N x n_ctrl, n_wl x * x *
+        return m  # n_wl x N x n_ctrl
 
     @staticmethod
     def __heightmap(u, v, c) -> Tensor:

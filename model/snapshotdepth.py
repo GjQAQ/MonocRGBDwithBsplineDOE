@@ -2,6 +2,7 @@ import typing
 import collections
 import argparse
 import json
+from typing import overload, Dict
 
 import pytorch_lightning as pl
 import pytorch_lightning.metrics.regression as regression
@@ -10,6 +11,7 @@ import torch.optim as optim
 import torchvision.transforms
 import torchvision.utils
 import debayer
+from torch import Tensor
 
 from reconstruction.reconstructor import Reconstructor
 from .vgg16loss import Vgg16PerceptualLoss
@@ -51,10 +53,10 @@ class SnapshotDepth(pl.LightningModule):
             'vgg_image': regression.MeanSquaredError(),
         }
         self.__loss_weights = [
-            hparams.depth_loss_weight,
-            hparams.image_loss_weight,
-            hparams.psf_expansion_loss_weight,
-            hparams.mtf_loss_weight
+            self.hparams.depth_loss_weight,
+            self.hparams.image_loss_weight,
+            self.hparams.psf_expansion_loss_weight,
+            self.hparams.mtf_loss_weight
         ]
 
         self.__build_model()
@@ -156,7 +158,6 @@ class SnapshotDepth(pl.LightningModule):
         # invert the gamma correction for sRGB image
         img_linear = utils.srgb_to_linear(img)
 
-        # Currently PSF jittering is supported only for MixedCamera.
         if torch.tensor(self.hparams.psf_jitter):
             # Jitter the PSF on the evaluation as well.
             captimgs, target_volumes, _ = self.camera.forward(
@@ -219,6 +220,11 @@ class SnapshotDepth(pl.LightningModule):
             psf
         )
 
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        states = super().state_dict(destination, prefix, keep_vars)
+        states.update(self.camera.feature_parameters())
+        return states
+
     def __build_model(self):
         hparams = self.hparams
         self.crop_width = hparams.crop_width
@@ -242,12 +248,14 @@ class SnapshotDepth(pl.LightningModule):
                 "degrees": (hparams.bspline_degree, hparams.bspline_degree)
             })
             self.camera = bsac.BSplineApertureCamera(**camera_recipe)
-        elif hparams.camera_type == 'rotationally-symmetric' or hparams.camera_type == 'mixed':
+        elif hparams.camera_type == 'rotationally-symmetric':
             camera_recipe.update({
                 'full_size': hparams.full_size,
                 'aperture_upsample_factor': hparams.mask_upsample_factor
             })
             self.camera = rsc.RotationallySymmetricCamera(**camera_recipe)
+        else:
+            raise ValueError(f'Unknown camera type: {hparams.camera_type}')
 
         self.decoder = Reconstructor(
             hparams.preinverse, hparams.n_depths, hparams.model_base_ch

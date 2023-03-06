@@ -14,7 +14,9 @@ from model.snapshotdepth import SnapshotDepth
 
 def main(args):
     device = torch.device('cpu')
-    ckpt_dir = os.path.join('log', args.experiment_name, f'version_{args.ckpt_version}', 'checkpoints')
+    ckpt_dir = os.path.join('log', args.experiment_name, f'version_{args.ckpt_version}')
+    # ckpt_dir = os.path.join('log', args.experiment_name, f'version_{args.ckpt_version}', 'checkpoints')
+    # ckpt_dir = os.path.join('log', args.experiment_name)
     ckpt_path = os.path.join(ckpt_dir, next(filter(lambda x: x.endswith('.ckpt'), os.listdir(ckpt_dir))))
     ckpt = torch.load(ckpt_path, map_location=lambda storage, loc: storage)
     hparams = ckpt['hyper_parameters']
@@ -56,8 +58,8 @@ def main(args):
     img_loss.update((outputs.est_img, outputs.target_img))
     depthmap_loss(outputs.est_depthmap, outputs.target_depthmap)
     print(f'''
-    PSNR:{img_loss.compute()};
-    RMSE:{math.sqrt(depthmap_loss.compute()) * (hparams['max_depth'] - hparams['min_depth'])}
+PSNR:{img_loss.compute()}
+RMSE:{math.sqrt(depthmap_loss.compute()) * (hparams['max_depth'] - hparams['min_depth'])}
     ''')
 
 

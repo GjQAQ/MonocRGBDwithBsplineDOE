@@ -88,8 +88,8 @@ def main(args):
 
     checkpoint_callback = ModelCheckpoint(
         verbose=True,
-        monitor='val_loss',
-        filepath=os.path.join(logger.log_dir, 'checkpoints', '{epoch}-{val_loss:.4f}'),
+        monitor='validation/val_loss',
+        filepath=os.path.join(logger.log_dir, 'model'),
         save_top_k=1,
         period=1,
         mode='min',
