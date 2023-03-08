@@ -33,6 +33,7 @@ def _copy_quadruple(x_rd):
 class RotationallySymmetricCamera(optics.Camera):
     def __init__(
         self,
+        aperture_size: int,
         full_size=100,
         aperture_upsample_factor=1,
         requires_grad: bool = False,
@@ -45,6 +46,7 @@ class RotationallySymmetricCamera(optics.Camera):
         self.__heightmap1d = torch.nn.Parameter(init_heightmap1d, requires_grad=requires_grad)
         self.__aperture_upsample_factor = aperture_upsample_factor
         self.__full_size = self.regularize_image_size(full_size)
+        self.__aperture_size = aperture_size
 
         self.__rho_sampling_full = None
         self.__ind_full = None
@@ -84,25 +86,22 @@ class RotationallySymmetricCamera(optics.Camera):
     def heightmap(self):
         heightmap1d = torch.cat([
             self.heightmap1d.cpu(),
-            torch.zeros((self._aperture_size // 2))
+            torch.zeros((self.__aperture_size // 2))
         ], dim=0)
         heightmap1d = heightmap1d.reshape(1, 1, -1)
-        r_grid = torch.arange(0, self._aperture_size, dtype=torch.double).reshape(1, -1)
-        y_coord = torch.arange(0, self._aperture_size // 2, dtype=torch.double).reshape(-1, 1) + 0.5
-        x_coord = torch.arange(0, self._aperture_size // 2, dtype=torch.double).reshape(1, -1) + 0.5
+        r_grid = torch.arange(0, self.__aperture_size, dtype=torch.double).reshape(1, -1)
+        y_coord = torch.arange(0, self.__aperture_size // 2, dtype=torch.double).reshape(-1, 1) + 0.5
+        x_coord = torch.arange(0, self.__aperture_size // 2, dtype=torch.double).reshape(1, -1) + 0.5
         r_coord = torch.sqrt(y_coord ** 2 + x_coord ** 2).unsqueeze(0)
         ind = _find_index(r_grid, r_coord)
         heightmap11 = cubic.interp(r_grid, heightmap1d, r_coord, ind).float()
         return _copy_quadruple(heightmap11).squeeze()
 
     def aberration(self, u, v, wavelength=None):
-        pass
+        pass  # todo
 
     def feature_parameters(self):
         return {'heightmap1d': self.__heightmap1d.data}
-
-    def mtf_loss(self, bounded=True, normalized=True):
-        return 0  # todo
 
     def specific_log(self, *args, **kwargs):
         log = super().specific_log(*args, **kwargs)
@@ -112,6 +111,10 @@ class RotationallySymmetricCamera(optics.Camera):
 
     def load_state_dict(self, state_dict: Union[Dict[str, Tensor], Dict[str, Tensor]], strict: bool = True):
         self.__heightmap1d.data = state_dict['heightmap1d']
+
+    @property
+    def aperture_pitch(self):
+        return self.aperture_diameter / self.__aperture_size
 
     @property
     def heightmap1d(self):
@@ -175,7 +178,7 @@ class RotationallySymmetricCamera(optics.Camera):
         # n_wl X (image_size[0]//2 + 1) X (image_size[1]//2 + 1)
         rho_sampling = rho_sampling.unsqueeze(0) * factor
 
-        r = self.aperture_pitch * torch.linspace(1, self._aperture_size / 2, self._aperture_size // 2).double()
+        r = self.aperture_pitch * torch.linspace(1, self.__aperture_size / 2, self.__aperture_size // 2).double()
         r = r.reshape(1, -1, 1)
         j = torch.where(
             rho_grid == 0,
@@ -211,7 +214,7 @@ class RotationallySymmetricCamera(optics.Camera):
     def __pointsource_inputfield1d(self, scene_distances):
         device = scene_distances.device
         r = self.aperture_pitch * torch.linspace(
-            1, self._aperture_size / 2, self._aperture_size // 2, device=device
+            1, self.__aperture_size / 2, self.__aperture_size // 2, device=device
         ).double()
         # compute pupil function
         wavelengths = self.buf_wavelengths.reshape(-1, 1, 1).double()

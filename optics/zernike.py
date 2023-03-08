@@ -18,14 +18,15 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
     ):
         super().__init__(**kwargs)
 
+        linear = (degree + 1) * (degree + 2) // 2
         self.__degree = degree
-        self.__coefficients = torch.nn.Parameter(torch.zeros(self.__l), requires_grad=requires_grad)
+        self.__coefficients = torch.nn.Parameter(torch.zeros(linear), requires_grad=requires_grad)
         self.__mat = self.__prepare_zmat()
 
     def psf_out_energy(self, psf_size: int):
         return 0, 0  # todo
 
-    def heightmap(self):
+    def compute_heightmap(self):
         return z.fit_with_matrix(self.__mat, self.__coefficients.unsqueeze(0), self.buf_r_sqr.shape[-2:])
 
     def aberration(self, u, v, wavelength=None):

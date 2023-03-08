@@ -5,7 +5,7 @@ import random
 
 import torch
 import pytorch_lightning.metrics as metrics
-from ignite.metrics import PSNR, RootMeanSquaredError
+from ignite.metrics import PSNR
 
 from dataset.sceneflow import SceneFlow
 from dataset.dualpixel import DualPixel
@@ -19,6 +19,10 @@ def main(args):
     # ckpt_dir = os.path.join('log', args.experiment_name)
     ckpt_path = os.path.join(ckpt_dir, next(filter(lambda x: x.endswith('.ckpt'), os.listdir(ckpt_dir))))
     ckpt = torch.load(ckpt_path, map_location=lambda storage, loc: storage)
+    ckpt['hyper_parameters']['loss_items'] = ('mtf',)
+    ckpt['hyper_parameters']['bspline_grid_size'] = 20
+    ckpt['hyper_parameters']['bspline_degree'] = 5
+    ckpt['hyper_parameters']['double_precision'] = False
     hparams = ckpt['hyper_parameters']
 
     image_sz = hparams['image_sz']

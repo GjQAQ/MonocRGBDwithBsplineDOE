@@ -30,6 +30,12 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
         self.__v_axis = self.__uv_grid(0)
         self.register_buffer('buf_r_sqr', self.u_axis ** 2 + self.v_axis ** 2)
 
+        self.__heightmap_history = None
+
+    @abc.abstractmethod
+    def compute_heightmap(self):
+        pass
+
     def psf(self, scene_distances, modulate_phase):
         r_sqr = self.buf_r_sqr.unsqueeze(1)  # n_wl x D x N_u x N_v
         scene_distances = scene_distances.reshape(1, -1, 1, 1)
@@ -54,7 +60,21 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
         psf = psf[..., sf // 2::sf, sf // 2::sf]
         psf *= torch.prod(self.interval, 1).reshape(-1, 1, 1, 1) ** 2
         psf /= (wl * self.sensor_distance) ** 2
-        return fft.fftshift(psf.float(), (-1, -2))
+        if self.__double:
+            psf = psf.float()
+        return fft.fftshift(psf, (-1, -2))
+
+    def heightmap(self, use_cache=False) -> torch.Tensor:
+        if not use_cache or self.__heightmap_history is None:
+            self.__heightmap_history = self.compute_heightmap()
+        return self.__heightmap_history
+
+    def specific_log(self, *args, **kwargs):
+        log = super().specific_log(*args, **kwargs)
+        h = self.heightmap(use_cache=True)
+        log['optics/heightmap_max'] = h.max()
+        log['optics/heightmap_min'] = h.min()
+        return log
 
     @property
     def u_axis(self):

@@ -2,12 +2,10 @@ from typing import Union, Dict
 
 import torch
 from torch import Tensor
-from torch.nn.functional import interpolate
 import numpy as np
 import scipy.interpolate as intp
 
 import optics.classic
-import utils.old_complex as old_complex
 import utils.fft as fft
 
 
@@ -24,7 +22,7 @@ def design_matrix(x, k, p) -> np.ndarray:
 class BSplineApertureCamera(optics.classic.ClassicCamera):
     def __init__(
         self,
-        grid_size=None,
+        grid_size=(50, 50),
         knot_vectors=None,
         degrees=(3, 3),
         requires_grad: bool = False,
@@ -46,10 +44,8 @@ class BSplineApertureCamera(optics.classic.ClassicCamera):
         :param requires_grad:
         :param kwargs:
         """
-        super().__init__(double_precision=False, **kwargs)
+        super().__init__(**kwargs)
 
-        if grid_size is None:
-            grid_size = (kwargs['aperture_size'], kwargs['aperture_size'])
         if knot_vectors is None:
             self.__degrees = degrees
             knot_vectors = (
@@ -68,11 +64,12 @@ class BSplineApertureCamera(optics.classic.ClassicCamera):
         self.__ab_r2 = None
         self.__ab_u_mat = None
         self.__ab_v_mat = None
+        self.__height_cache = None
 
     def psf_out_energy(self, psf_size: int):
         return 0, 0  # todo
 
-    def heightmap(self):
+    def compute_heightmap(self):
         return self.__heightmap(
             self.buf_u_matrix,
             self.buf_v_matrix,

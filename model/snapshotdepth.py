@@ -2,7 +2,6 @@ import typing
 import collections
 import argparse
 import json
-from typing import overload, Dict
 
 import pytorch_lightning as pl
 import pytorch_lightning.metrics.regression as regression
@@ -11,8 +10,8 @@ import torch.optim as optim
 import torchvision.transforms
 import torchvision.utils
 import debayer
-from torch import Tensor
 
+import optics.zernike
 from reconstruction.reconstructor import Reconstructor
 from .vgg16loss import Vgg16PerceptualLoss
 import dataset
@@ -59,9 +58,17 @@ class SnapshotDepth(pl.LightningModule):
             self.hparams.mtf_loss_weight
         ]
 
-        self.__build_model()
-
         self.log_dir = log_dir
+        self.decoder = Reconstructor(
+            self.hparams.preinverse, self.hparams.n_depths, self.hparams.model_base_ch
+        )
+        self.debayer = debayer.Debayer3x3()
+
+        self.image_lossfn = Vgg16PerceptualLoss()
+        self.depth_lossfn = torch.nn.L1Loss()
+
+        self.__construct_camera()
+
 
     def configure_optimizers(self):
         return optim.Adam([
@@ -225,7 +232,7 @@ class SnapshotDepth(pl.LightningModule):
         states.update(self.camera.feature_parameters())
         return states
 
-    def __build_model(self):
+    def __construct_camera(self):
         hparams = self.hparams
         self.crop_width = hparams.crop_width
 
@@ -239,32 +246,32 @@ class SnapshotDepth(pl.LightningModule):
             'camera_pitch': hparams.camera_pixel_pitch,
             'focal_length': hparams.focal_length,
             'aperture_diameter': hparams.focal_length / hparams.f_number,
-            'aperture_size': hparams.mask_sz,
             'diffraction_efficiency': hparams.diffraction_efficiency,
-            "requires_grad": hparams.optimize_optics
+            'requires_grad': hparams.optimize_optics,
+            'loss_items': hparams.loss_items or ()
         }
         if hparams.camera_type == 'b-spline':
             camera_recipe.update({
-                "degrees": (hparams.bspline_degree, hparams.bspline_degree)
+                'double_precision': hparams.double_precision,
+                "degrees": [hparams.bspline_degree] * 2,
+                "grid_size": [hparams.bspline_grid_size] * 2
             })
             self.camera = bsac.BSplineApertureCamera(**camera_recipe)
         elif hparams.camera_type == 'rotationally-symmetric':
             camera_recipe.update({
                 'full_size': hparams.full_size,
-                'aperture_upsample_factor': hparams.mask_upsample_factor
+                'aperture_upsample_factor': hparams.mask_upsample_factor,
+                'aperture_size': hparams.mask_sz,
             })
             self.camera = rsc.RotationallySymmetricCamera(**camera_recipe)
+        elif hparams.camera_type == 'zernike':
+            camera_recipe.update({
+                'double_precision': hparams.double_precision,
+                'degree': hparams.zernike_degree
+            })
+            self.camera = optics.zernike.ZernikeApertureCamera(**camera_recipe)
         else:
             raise ValueError(f'Unknown camera type: {hparams.camera_type}')
-
-        self.decoder = Reconstructor(
-            hparams.preinverse, hparams.n_depths, hparams.model_base_ch
-        )
-        self.debayer = debayer.Debayer3x3()
-
-        self.image_lossfn = Vgg16PerceptualLoss()
-        self.depth_lossfn = torch.nn.L1Loss()
-
         print(self.camera)
 
     def __step_common(

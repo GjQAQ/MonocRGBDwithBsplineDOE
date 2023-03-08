@@ -44,7 +44,9 @@
     "default": false,
     "action": "store_true"
   },
-
+  "loss_items": {
+    "nargs": "*"
+  },
   "depth_loss_weight": {
     "type": "float",
     "default": 1
@@ -61,11 +63,20 @@
     "type": "float",
     "default": 1
   },
+
+  "reg_tikhonov": {
+    "type": "float",
+    "default": 1
+  },
+  "model_base_ch": {
+    "type": "int",
+    "default": 32
+  },
+
   "psf_size": {
     "type": "int",
     "default": 64
   },
-
   "image_sz": {
     "type": "int",
     "default": 256
@@ -85,28 +96,6 @@
   "crop_width": {
     "type": "int",
     "default": 32
-  },
-
-  "reg_tikhonov": {
-    "type": "float",
-    "default": 1
-  },
-  "model_base_ch": {
-    "type": "int",
-    "default": 32
-  },
-  "bspline_degree": {
-    "type": "int",
-    "default": 5
-  },
-
-  "camera_type": {
-    "type": "str",
-    "default": "b-spline"
-  },
-  "mask_sz": {
-    "type": "int",
-    "default": 8000
   },
   "focal_length": {
     "type": "float",
@@ -132,6 +121,19 @@
     "type": "float",
     "default": 5e-3
   },
+  "diffraction_efficiency": {
+    "type": "float",
+    "default": 0.7
+  },
+
+  "camera_type": {
+    "type": "str",
+    "default": "b-spline"
+  },
+  "mask_sz": {
+    "type": "int",
+    "default": 8000
+  },
   "full_size": {
     "type": "int",
     "default": 1920
@@ -140,9 +142,17 @@
     "type": "int",
     "default": 10
   },
-  "diffraction_efficiency": {
-    "type": "float",
-    "default": 0.7
+  "bspline_grid_size": {
+    "type": "int",
+    "default": 50
+  },
+  "bspline_degree": {
+    "type": "int",
+    "default": 5
+  },
+  "zernike_degree": {
+    "type": "int",
+    "default": 10
   },
 
   "#flag": {
@@ -151,6 +161,7 @@
     "occlusion": true,
     "optimize_optics": false,
     "log_misc": false,
+    "double_precision": false,
     "psfjitter": {
       "dest": "psf_jitter",
       "default": true

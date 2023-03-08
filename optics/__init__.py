@@ -41,7 +41,6 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
         max_depth: float,
         n_depths: int,
         image_size: typing.Union[int, typing.List[int]],
-        aperture_size: int,
         focal_length: float,
         aperture_diameter: float,
         camera_pitch: float,
@@ -66,7 +65,6 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
         self._camera_pitch = camera_pitch
         self.__focal_length = focal_length
         self._image_size = self.regularize_image_size(image_size)
-        self._aperture_size = aperture_size
         self.__loss_items = loss_items
 
         self.__register_wavlength(wavelengths)
@@ -78,35 +76,38 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
             fx = torch.linspace(-0.5, 0.5, self._image_size[-1]).reshape(1, -1) / self.camera_pitch
             mtf_bound = self.aperture_diameter ** 3 / (s * torch.sqrt(fx ** 2 + fy ** 2))
             self.register_buffer('buf_mtf_bound', mtf_bound)
+        else:
+            self.mtf_loss = lambda *args, **kwargs: 0
+        if 'psf_expansion' not in loss_items:
+            self.psf_out_energy = lambda *args, **kwargs: (0, 0)
 
         self._diffraction_scaler = None
         self.__psf_cache = None
 
     @abc.abstractmethod
-    def psf(self, scene_distances, modulate_phase):
+    def psf(self, scene_distances, modulate_phase) -> torch.Tensor:
         pass
 
     @abc.abstractmethod
-    def psf_out_energy(self, psf_size: int):
+    def psf_out_energy(self, psf_size: int) -> typing.Tuple[float, float]:
         pass
 
     @abc.abstractmethod
-    def heightmap(self):
+    def heightmap(self) -> torch.Tensor:
         pass
 
     @abc.abstractmethod
-    def aberration(self, u, v, wavelength=None):
+    def aberration(self, u, v, wavelength=None) -> torch.Tensor:
         pass
 
     @abc.abstractmethod
-    def feature_parameters(self):
+    def feature_parameters(self) -> typing.Dict:
         pass
 
     def extra_repr(self):
         return f'''
 Camera module...
 Refcative index for center wavelength: {self.refractive_index(self.buf_wavelengths[self.n_wavelengths // 2])}
-Aperture pitch: {self.aperture_pitch * 1e6}[um]
 f number: {self.f_number:.3f}
 Depths: {self.buf_scene_distances}
 Input image size: {self._image_size}
@@ -133,7 +134,6 @@ Input image size: {self._image_size}
             return utils.pad_or_crop(self.__psf_cache, size)
 
         device = self.device
-        is_training = False
         init_sd = torch.linspace(0, 1, steps=self._n_depths, device=device)
         if is_training:
             init_sd += (torch.rand(self._n_depths, device=device) - 0.5) / self._n_depths
@@ -166,9 +166,6 @@ Input image size: {self._image_size}
         return torch.where(r2 < self.aperture_diameter ** 2 / 4, x, torch.zeros_like(x))
 
     def mtf_loss(self, bounded=True, normalized=True):
-        if 'mtf' not in self.__loss_items:
-            return 0
-
         mtf = self.mtf
         if normalized:
             mtf = self.normalize(mtf)
@@ -212,6 +209,9 @@ Input image size: {self._image_size}
 
     @torch.no_grad()
     def specific_log(self, *args, **kwargs):
+        if 'psf_expansion' not in self.__loss_items:
+            return {}
+
         psf_loss = self.psf_out_energy(kwargs['psf_size'])
         return {
             'optics/psf_out_of_fov_energy': psf_loss[0],
@@ -237,10 +237,6 @@ Input image size: {self._image_size}
     @property
     def slope_range(self):
         return 2 * (self._max_depth - self._min_depth) / (self._max_depth + self._min_depth)
-
-    @property
-    def aperture_pitch(self):
-        return self._aperture_diameter / self._aperture_size
 
     @property
     def camera_pitch(self):
