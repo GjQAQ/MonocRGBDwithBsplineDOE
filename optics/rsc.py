@@ -8,6 +8,7 @@ import numpy as np
 from torch import Tensor
 
 import optics
+import optics.base
 import utils
 import algorithm.cubicspline as cubic
 
@@ -30,7 +31,7 @@ def _copy_quadruple(x_rd):
     return x
 
 
-class RotationallySymmetricCamera(optics.Camera):
+class RotationallySymmetricCamera(optics.base.Camera):
     def __init__(
         self,
         aperture_size: int,
@@ -41,7 +42,7 @@ class RotationallySymmetricCamera(optics.Camera):
     ):
         super().__init__(**kwargs)
 
-        init_heightmap1d = torch.zeros(kwargs['aperture_size'] // 2 // aperture_upsample_factor)
+        init_heightmap1d = torch.zeros(aperture_size // 2 // aperture_upsample_factor)
 
         self.__heightmap1d = torch.nn.Parameter(init_heightmap1d, requires_grad=requires_grad)
         self.__aperture_upsample_factor = aperture_upsample_factor
@@ -70,7 +71,7 @@ class RotationallySymmetricCamera(optics.Camera):
         device = self.buf_h.device
         scene_distances = utils.ips_to_metric(
             torch.linspace(0, 1, steps=self._n_depths, device=device),
-            self._min_depth, self._max_depth
+            *self.depth_range
         )
         psf1d_diffracted = self.__psf1d(self.buf_h_full, scene_distances, torch.tensor(True))
         # Normalize PSF based on the cropped PSF
@@ -197,10 +198,10 @@ class RotationallySymmetricCamera(optics.Camera):
         wavelengths = self.buf_wavelengths.reshape(-1, 1, 1).double()
         phase = prop_phase
         if modulate_phase:
-            phase += self.heightmap2phase(
+            phase += optics.heightmap2phase(
                 self.heightmap1d.reshape(1, -1),  # add wavelength dim
                 wavelengths,
-                self.refractive_index(wavelengths)
+                optics.refractive_index(wavelengths)
             )
 
         # broadcast the matrix-vector multiplication

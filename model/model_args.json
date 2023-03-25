@@ -26,7 +26,7 @@
   },
   "optics_lr": {
     "type": "float",
-    "default": 1e-9
+    "default": 2e-9
   },
   "batch_sz": {
     "type": "int",
@@ -162,6 +162,8 @@
     "optimize_optics": false,
     "log_misc": false,
     "double_precision": false,
+    "dynamic_conv": true,
+    "lattice_focal_init": false,
     "psfjitter": {
       "dest": "psf_jitter",
       "default": true

@@ -11,6 +11,7 @@ import torchvision.transforms
 import torchvision.utils
 import debayer
 
+import dataset.img_transform
 import optics.zernike
 from reconstruction.reconstructor import Reconstructor
 from .vgg16loss import Vgg16PerceptualLoss
@@ -60,7 +61,10 @@ class SnapshotDepth(pl.LightningModule):
 
         self.log_dir = log_dir
         self.decoder = Reconstructor(
-            self.hparams.preinverse, self.hparams.n_depths, self.hparams.model_base_ch
+            self.hparams.dynamic_conv,
+            self.hparams.preinverse,
+            self.hparams.n_depths,
+            self.hparams.model_base_ch
         )
         self.debayer = debayer.Debayer3x3()
 
@@ -69,13 +73,11 @@ class SnapshotDepth(pl.LightningModule):
 
         self.__construct_camera()
 
-
     def configure_optimizers(self):
         return optim.Adam([
             {'params': self.camera.parameters(), 'lr': self.hparams.optics_lr},
             {'params': self.decoder.parameters(), 'lr': self.hparams.cnn_lr},
-        ]
-        )
+        ])
 
     def optimizer_step(
         self,
@@ -254,7 +256,8 @@ class SnapshotDepth(pl.LightningModule):
             camera_recipe.update({
                 'double_precision': hparams.double_precision,
                 "degrees": [hparams.bspline_degree] * 2,
-                "grid_size": [hparams.bspline_grid_size] * 2
+                "grid_size": [hparams.bspline_grid_size] * 2,
+                'lattice_focal_init': hparams.lattice_focal_init
             })
             self.camera = bsac.BSplineApertureCamera(**camera_recipe)
         elif hparams.camera_type == 'rotationally-symmetric':
@@ -267,7 +270,8 @@ class SnapshotDepth(pl.LightningModule):
         elif hparams.camera_type == 'zernike':
             camera_recipe.update({
                 'double_precision': hparams.double_precision,
-                'degree': hparams.zernike_degree
+                'degree': hparams.zernike_degree,
+                'lattice_focal_init': hparams.lattice_focal_init
             })
             self.camera = optics.zernike.ZernikeApertureCamera(**camera_recipe)
         else:
@@ -329,7 +333,7 @@ class SnapshotDepth(pl.LightningModule):
         # CAUTION! Summary image is clamped, and visualized in sRGB.
 
         captimgs, target_images, target_depthmaps, est_images, est_depthmaps = [
-            utils.img_resize(output[x], summary_image_sz).to('cpu')
+            utils.img_resize(output[x].cpu(), summary_image_sz)
             for x in [0, 4, 5, 2, 3]
         ]
         target_depthmaps = _gray_to_rgb(1.0 - target_depthmaps)

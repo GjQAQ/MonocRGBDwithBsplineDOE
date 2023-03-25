@@ -17,12 +17,13 @@ def main(args):
     ckpt_dir = os.path.join('log', args.experiment_name, f'version_{args.ckpt_version}')
     # ckpt_dir = os.path.join('log', args.experiment_name, f'version_{args.ckpt_version}', 'checkpoints')
     # ckpt_dir = os.path.join('log', args.experiment_name)
-    ckpt_path = os.path.join(ckpt_dir, next(filter(lambda x: x.endswith('.ckpt'), os.listdir(ckpt_dir))))
+    ckpt_path = os.path.join(
+        ckpt_dir,
+        # next(filter(lambda x: x.endswith('.ckpt'), os.listdir(ckpt_dir)))
+        'model-v4.ckpt'
+    )
     ckpt = torch.load(ckpt_path, map_location=lambda storage, loc: storage)
-    ckpt['hyper_parameters']['loss_items'] = ('mtf',)
-    ckpt['hyper_parameters']['bspline_grid_size'] = 20
-    ckpt['hyper_parameters']['bspline_degree'] = 5
-    ckpt['hyper_parameters']['double_precision'] = False
+    ckpt['hyper_parameters']['lattice_focal_init'] = True
     hparams = ckpt['hyper_parameters']
 
     image_sz = hparams['image_sz']
@@ -32,7 +33,7 @@ def main(args):
     padding = 0
     sf = SceneFlow(
         '/home/ps/Data/Guojiaqi/dataset/sceneflow',
-        'train',
+        'val',
         (image_sz + 4 * crop_width, image_sz + 4 * crop_width),
         random_crop=randcrop, augment=augment, padding=padding, is_training=False
     )
@@ -56,15 +57,21 @@ def main(args):
     model = model.to(device)
     model.eval()
 
-    outputs = model.forward(item[1].unsqueeze(0), item[2].unsqueeze(0), False)
-    img_loss = PSNR(1)
-    depthmap_loss = metrics.MeanSquaredError()
-    img_loss.update((outputs.est_img, outputs.target_img))
-    depthmap_loss(outputs.est_depthmap, outputs.target_depthmap)
+    psnr = []
+    rmse = []
+    for i in range(args.repetition):
+        outputs = model.forward(item[1].unsqueeze(0), item[2].unsqueeze(0), False)
+        img_loss = PSNR(1)
+        depthmap_loss = metrics.MeanSquaredError()
+        img_loss.update((outputs.est_img, outputs.target_img))
+        depthmap_loss(outputs.est_depthmap, outputs.target_depthmap)
+        psnr.append(img_loss.compute())
+        rmse.append(math.sqrt(depthmap_loss.compute()) * (hparams['max_depth'] - hparams['min_depth']))
     print(f'''
-PSNR:{img_loss.compute()}
-RMSE:{math.sqrt(depthmap_loss.compute()) * (hparams['max_depth'] - hparams['min_depth'])}
-    ''')
+version:{ckpt_path}
+PSNR:{min(psnr):.3g}/{sum(psnr) / args.repetition:.3g}/{max(psnr):.3g}
+RMSE:{min(rmse):.3g}/{sum(rmse) / args.repetition:.3g}/{max(rmse):.3g}
+        ''')
 
 
 if __name__ == '__main__':
@@ -72,5 +79,6 @@ if __name__ == '__main__':
     parser.add_argument('--img_path', type=str, default=None)
     parser.add_argument('--experiment_name', type=str, default='ExtendedDOF')
     parser.add_argument('--ckpt_version', type=int)
+    parser.add_argument('--repetition', type=int, default=1)
 
     main(parser.parse_args())

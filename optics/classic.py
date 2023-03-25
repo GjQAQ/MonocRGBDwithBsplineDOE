@@ -1,7 +1,6 @@
 import abc
 
 import torch
-from torch.nn.functional import interpolate
 import numpy as np
 
 import optics
@@ -36,6 +35,10 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
     def compute_heightmap(self):
         pass
 
+    @abc.abstractmethod
+    def lattice_focal_init(self):
+        pass
+
     def psf(self, scene_distances, modulate_phase):
         r_sqr = self.buf_r_sqr.unsqueeze(1)  # n_wl x D x N_u x N_v
         scene_distances = scene_distances.reshape(1, -1, 1, 1)
@@ -48,7 +51,7 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
         phase2 = torch.sqrt(r_sqr + self.focal_depth ** 2) - self.focal_depth
         phase = (phase1 - phase2) * (2 * np.pi / wl)
         if modulate_phase:
-            phase += self.heightmap2phase(self.heightmap().unsqueeze(1), wl, self.refractive_index(wl))
+            phase += optics.heightmap2phase(self.heightmap().unsqueeze(1), wl, optics.refractive_index(wl))
 
         amplitude = scene_distances / (wl * item)
         amplitude = self.apply_stop(r_sqr, amplitude)
@@ -72,6 +75,7 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
     def specific_log(self, *args, **kwargs):
         log = super().specific_log(*args, **kwargs)
         h = self.heightmap(use_cache=True)
+        h = self.apply_stop(self.buf_r_sqr, h)
         log['optics/heightmap_max'] = h.max()
         log['optics/heightmap_min'] = h.min()
         return log

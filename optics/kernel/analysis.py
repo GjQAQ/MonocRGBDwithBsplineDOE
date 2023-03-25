@@ -2,10 +2,22 @@ from typing import Callable, Tuple, Iterable
 
 import numpy as np
 import torch
-from scipy.fft import ifft2
 
 import utils.fft as fft
 import utils.old_complex as old_complex
+
+
+def get_delta(delta0, f, d):
+    m = f / (d - f)
+    return delta0 / m
+
+
+def get_slope_range(d_min, d_max):
+    return 2 * (d_max - d_min) / (d_max + d_min)
+
+
+def get_center_depth(d_min, d_max):
+    return 2 * d_min * d_max / (d_min + d_max)
 
 
 def kernel_spectrum(
@@ -17,8 +29,7 @@ def kernel_spectrum(
     y_frequency: Iterable[float] = None,
     grid_size: Tuple[int, int] = (512, 512),
     show_size: Tuple[int, int] = None,
-    show_xi: bool = False,
-    stretch: Callable = None
+    show_xi: bool = False
 ):
     if x_frequency is None:
         x_frequency = torch.linspace(-1, 1, 5) * (max_frequency[0] / 2)
@@ -52,8 +63,6 @@ def kernel_spectrum(
         res = res[..., c1:-c1, c2:-c2]
     res = torch.sqrt(res)
     res /= torch.max(res)
-    if stretch is not None:
-        res = stretch(res)
 
     if show_xi:
         return res, old_complex.abs(xi),

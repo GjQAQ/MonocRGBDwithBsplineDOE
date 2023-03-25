@@ -11,6 +11,7 @@ import cv2
 import skimage.transform as transform
 
 import dataset
+import dataset.img_transform
 import utils
 
 CROP_WIDTH = 20
@@ -37,7 +38,7 @@ class DualPixel(data.Dataset):
         else:
             raise ValueError(f'dataset ({partition}) has to be "train," "val," or "example."')
 
-        self.__transform = dataset.RandomTransform(image_size, random_crop, augment)
+        self.__transform = dataset.img_transform.RandomTransform(image_size, random_crop, augment)
         self.__centercrop = augmentation.CenterCrop(image_size)
 
         self.__records = self.__get_captures(self.__base_dir)
@@ -50,7 +51,7 @@ class DualPixel(data.Dataset):
     def __len__(self):
         return len(self.__records)
 
-    def __getitem__(self, idx) -> dataset.ImageItem:
+    def __getitem__(self, idx) -> dataset.img_transform.ImageItem:
         _id = self.__records[idx]
         image_path = glob.glob(os.path.join(self.__base_dir, 'scaled_images', _id, '*_center.jpg'))[0]
         depth_path = glob.glob(os.path.join(self.__base_dir, 'merged_depth', _id, '*_center.png'))[0]
@@ -81,7 +82,7 @@ class DualPixel(data.Dataset):
         depthmap = depthmap.squeeze(0)
         depth_conf = torch.where(conf.squeeze(0) > 0.99, 1., 0.)
 
-        return dataset.ImageItem(_id, img, depthmap, depth_conf)
+        return dataset.img_transform.ImageItem(_id, img, depthmap, depth_conf)
 
     def __prepare(self, x):
         x = x[CROP_WIDTH:-CROP_WIDTH, CROP_WIDTH:-CROP_WIDTH, :]

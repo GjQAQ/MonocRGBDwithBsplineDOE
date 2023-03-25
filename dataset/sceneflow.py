@@ -9,6 +9,7 @@ import kornia.augmentation as augmentation
 import kornia.filters as filters
 
 import dataset
+import dataset.img_transform
 
 
 class SceneFlow(data.Dataset):
@@ -25,21 +26,21 @@ class SceneFlow(data.Dataset):
         ignore_incomplete: bool = True
     ):
         super().__init__()
-        self.__dataset_path = {
-            'train': {
+        self.__dataset_path = {}
+        for p in ('train', 'val'):
+            self.__dataset_path[p] = {
                 'img': os.path.join(
-                    sf_root, 'FlyingThings3D_subset', 'train', 'image_clean', 'right'
+                    sf_root, 'FlyingThings3D_subset', p, 'image_clean', 'right'
                 ),
                 'disparity': os.path.join(
-                    sf_root, 'FlyingThings3D_subset_disparity', 'train', 'disparity', 'right'
+                    sf_root, 'FlyingThings3D_subset_disparity', p, 'disparity', 'right'
                 )
             }
-        }
 
         if partition not in self.__dataset_path:
-            raise ValueError(f'Wrong dataset: {partition}; expected: [train]')
+            raise ValueError(f'Wrong dataset: {partition}; expected: {self.__dataset_path.keys()}')
 
-        self.__transform = dataset.RandomTransform(image_size, random_crop, augment)
+        self.__transform = dataset.img_transform.RandomTransform(image_size, random_crop, augment)
         self.__centercrop = augmentation.CenterCrop(image_size)
 
         self.__records = []
@@ -69,7 +70,7 @@ class SceneFlow(data.Dataset):
     def __len__(self):
         return len(self.__records)
 
-    def __getitem__(self, item: int) -> dataset.ImageItem:
+    def __getitem__(self, item: int) -> dataset.img_transform.ImageItem:
         id_ = self.__records[item]
         img_dir = self.__dataset_path[self.__partition]['img']
         disparity_dir = self.__dataset_path[self.__partition]['disparity']
@@ -88,7 +89,7 @@ class SceneFlow(data.Dataset):
         depthmap = filters.gaussian_blur2d(depthmap, sigma=(0.8, 0.8), kernel_size=(5, 5))
         img, depthmap = img.squeeze(0), depthmap.squeeze(0)
 
-        return dataset.ImageItem(id_, img, depthmap, torch.ones_like(depthmap))
+        return dataset.img_transform.ImageItem(id_, img, depthmap, torch.ones_like(depthmap))
 
     def __prepare(
         self, img_path: str, disparity_path: str

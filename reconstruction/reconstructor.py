@@ -14,6 +14,7 @@ ReconstructionOutput = collections.namedtuple('ReconstructionOutput', ['est_img'
 class Reconstructor(nn.Module):
     def __init__(
         self,
+        dynamic_conv: bool,
         preinverse: bool = True,
         n_depth: int = 16,
         ch_base: int = 32
@@ -42,7 +43,7 @@ class Reconstructor(nn.Module):
         )
         self.__decoder = nn.Sequential(
             input_layer,
-            unet.UNet([ch_base, ch_base, 2 * ch_base, 2 * ch_base, 4 * ch_base]),
+            unet.UNet([ch_base, ch_base, 2 * ch_base, 2 * ch_base, 4 * ch_base], dynamic_conv=dynamic_conv),
             output_layer,
         )
 

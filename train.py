@@ -90,7 +90,7 @@ def main(args):
         verbose=True,
         monitor='validation/val_loss',
         filepath=os.path.join(logger.log_dir, 'model'),
-        save_top_k=1,
+        save_top_k=args.save_top,
         period=1,
         mode='min',
     )
@@ -116,6 +116,7 @@ if __name__ == '__main__':
     parser.add_argument('--experiment_name', type=str, default='ExtendedDOF')
     parser.add_argument('--mix_dualpixel_dataset', dest='mix_dualpixel_dataset', action='store_true')
     parser.add_argument('--last_checkpoint', type=str, default='')
+    parser.add_argument('--save_top', type=int, default=5)
 
     parser = pl.Trainer.add_argparse_args(parser)
     parser = SnapshotDepth.add_model_specific_args(parser, os.path.join('model', 'model_args.json'))
