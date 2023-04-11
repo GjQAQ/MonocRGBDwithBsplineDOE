@@ -34,6 +34,8 @@ def load_trained_lens(ckpt_path) -> optics.BSplineApertureCamera:
     ckpt = torch.load(ckpt_path, map_location=lambda storage, loc: storage)
     ckpt['hyper_parameters']['lattice_focal_init'] = True
     ckpt['hyper_parameters']['dynamic_conv'] = False
+    ckpt['hyper_parameters']['effective_psf_factor'] = 1
+    ckpt['hyper_parameters']['norm'] = 'BN'
     model = SnapshotDepth.construct_from_checkpoint(ckpt)
     model = model.to(torch.device('cpu'))
     model.eval()
@@ -79,9 +81,10 @@ def lattice_focal_spectrum(
     n = round(n)
     if n < 2:
         raise ValueError(f'Wrong subsquare number: {n}')
+    s = torch.randn(n * n) * slope_range / 4
 
     def __lattice_focus_shift(u, v):
-        r2, slopemap, index = algorithm.lattice_focal_slopemap(u, v, n, slope_range, aperture)
+        r2, slopemap, index = algorithm.lattice_focal_slopemap(u, v, n, slope_range, aperture, s)
         if show_slopemap:
             plt.imshow(slopemap[2][2].detach())
             plt.show()
@@ -136,9 +139,9 @@ if __name__ == '__main__':
         params = (7e-6, 85e-3, 0.7)
         spectrum = lattice_focal_spectrum(
             params[0], params[1], 0.35, 100, 1000 * get_delta(*params), 550e-9,
-            by_heightmap=True
+            by_heightmap=False
         )
-    elif args.type in ('bspline', 'rsc', 'zernike'):
+    elif args.type == 'trained':
         spectrum = trained_lens_spectrum(args.ckpt_path)
     else:
         raise ValueError(f'Unknown optics type: {args.type}')

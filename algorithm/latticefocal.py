@@ -26,8 +26,9 @@ def lattice_focal_heightmap(r2, slopemap, index, n, f, d, wl):
     return heightmap
 
 
-def lattice_focal_slopemap(u, v, n, slope_range, aperture_diameter):
-    s = torch.randn(n * n) * slope_range / 4
+def lattice_focal_slopemap(u, v, n, slope_range, aperture_diameter, s=None):
+    if s is None:
+        s = torch.randn(n * n) * slope_range / 4
     s = torch.clamp(s, -slope_range / 2, slope_range / 2)
     r2 = u ** 2 + v ** 2
     index = __index(u, aperture_diameter, n) * n + __index(v, aperture_diameter, n)

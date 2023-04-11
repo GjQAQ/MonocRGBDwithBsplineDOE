@@ -79,13 +79,7 @@ class BSplineApertureCamera(optics.ClassicCamera):
         )  # n_wl x N_u x N_v
 
     def lattice_focal_init(self):
-        slope_range = kn.get_slope_range(*self.depth_range)
-        n = (self.aperture_diameter * slope_range
-             / (2 * kn.get_delta(self.camera_pitch, self.focal_length, self.focal_depth))) ** (1 / 3)
-        n = max(10, round(n))
-        if n < 2:
-            raise ValueError(f'Wrong subsquare number: {n}')
-        wl = self.buf_wavelengths[self.n_wavelengths // 2]
+        slope_range, n, wl = self.prepare_lattice_focal_init()
         r = self.aperture_diameter / 2
         u = torch.linspace(-r, r, self.__grid_size[0])[None, ...]
         v = torch.linspace(-r, r, self.__grid_size[1])[..., None]

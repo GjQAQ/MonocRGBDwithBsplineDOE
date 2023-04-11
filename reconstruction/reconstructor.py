@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 import reconstruction.unet as unet
+from reconstruction.odconv import ODConv2d
 import utils
 
 CH_DEPTH = 1
@@ -17,17 +18,19 @@ class Reconstructor(nn.Module):
         dynamic_conv: bool,
         preinverse: bool = True,
         n_depth: int = 16,
-        ch_base: int = 32
+        ch_base: int = 32,
+        norm_layer=None
     ):
         super().__init__()
         self.__preinverse = preinverse
         ch_pin = CH_RGB * (n_depth + 1)
+        convblock = ODConv2d if dynamic_conv else nn.Conv2d
 
         input_layer = nn.Sequential(
-            nn.Conv2d(ch_pin, ch_pin, kernel_size=3, padding=1, bias=False),
+            convblock(ch_pin, ch_pin, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(ch_pin),
             nn.ReLU(),
-            nn.Conv2d(ch_pin, ch_base, kernel_size=3, padding=1, bias=False),
+            convblock(ch_pin, ch_base, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(ch_base),
             nn.ReLU()
         )
@@ -43,7 +46,7 @@ class Reconstructor(nn.Module):
         )
         self.__decoder = nn.Sequential(
             input_layer,
-            unet.UNet([ch_base, ch_base, 2 * ch_base, 2 * ch_base, 4 * ch_base], dynamic_conv=dynamic_conv),
+            unet.UNet([ch_base, ch_base, 2 * ch_base, 2 * ch_base, 4 * ch_base], norm_layer, False),
             output_layer,
         )
 

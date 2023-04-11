@@ -1,7 +1,11 @@
+import warnings
+
 import torch
 
 __fft = torch.fft
 import torch.fft as fft
+
+warnings.filterwarnings('ignore')
 
 
 def fftshift(x, dims=(-1, -2)):
@@ -35,12 +39,6 @@ def conv2(x, y):
 def autocorrelation1d(x: torch.Tensor) -> torch.Tensor:
     res = fft.irfft(fft.rfft(x).abs() ** 2, x.shape[-1])
     return res / res.max()
-
-
-def autocorrelation2d_sym(x: torch.Tensor) -> torch.Tensor:
-    a = autocorrelation1d(x.sum(dim=-2, keepdim=False)).unsqueeze(-2)
-    b = autocorrelation1d(x.sum(dim=-1, keepdim=False)).unsqueeze(-1)
-    return (1 - a) * (1 - b)
 
 
 # the followings are implemented by torch.* rather than torch.fft.*

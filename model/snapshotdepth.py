@@ -1,17 +1,20 @@
+import re
 import typing
 import collections
 import argparse
 import json
+from typing import Union, Dict
 
 import pytorch_lightning as pl
 import pytorch_lightning.metrics.regression as regression
 import torch
+import torch.nn
 import torch.optim as optim
 import torchvision.transforms
 import torchvision.utils
 import debayer
+from torch import Tensor
 
-import dataset.img_transform
 import optics.zernike
 from reconstruction.reconstructor import Reconstructor
 from .vgg16loss import Vgg16PerceptualLoss
@@ -38,7 +41,13 @@ FinalOutput = collections.namedtuple(
 
 
 class SnapshotDepth(pl.LightningModule):
-    def __init__(self, hparams, log_dir=None):
+    norm_dict = {
+        'BN': torch.nn.BatchNorm2d,
+        'LN': torch.nn.LayerNorm,
+        'IN': torch.nn.InstanceNorm2d
+    }
+
+    def __init__(self, hparams, log_dir=None, print_info=True):
         super().__init__()
         self.hparams = hparams
         self.save_hyperparameters(self.hparams)
@@ -64,14 +73,15 @@ class SnapshotDepth(pl.LightningModule):
             self.hparams.dynamic_conv,
             self.hparams.preinverse,
             self.hparams.n_depths,
-            self.hparams.model_base_ch
+            self.hparams.model_base_ch,
+            self.norm_dict[self.hparams.norm.upper()]
         )
         self.debayer = debayer.Debayer3x3()
 
         self.image_lossfn = Vgg16PerceptualLoss()
         self.depth_lossfn = torch.nn.L1Loss()
 
-        self.__construct_camera()
+        self.__construct_camera(print_info)
 
     def configure_optimizers(self):
         return optim.Adam([
@@ -142,7 +152,7 @@ class SnapshotDepth(pl.LightningModule):
             if item.endswith('depthmap'):
                 loss(*depthmap_pair)
                 self.log(f'validation/{item}', loss, on_step=False, on_epoch=True)
-            elif item.endswith('img'):
+            elif item.endswith('image'):
                 loss(*img_pair)
                 self.log(f'validation/{item}', loss, on_step=False, on_epoch=True)
         self.__metrics['vgg_image'](*img_pair)
@@ -159,6 +169,7 @@ class SnapshotDepth(pl.LightningModule):
         val_loss = self.__combine_loss(
             self.__metrics['mae_depthmap'].compute(),
             self.__metrics['vgg_image'].compute(),
+            0.,
             0.
         )
         self.log('validation/val_loss', val_loss)
@@ -234,7 +245,17 @@ class SnapshotDepth(pl.LightningModule):
         states.update(self.camera.feature_parameters())
         return states
 
-    def __construct_camera(self):
+    def load_state_dict(self, state_dict: Union[Dict[str, Tensor], Dict[str, Tensor]], strict: bool = True):
+        try:
+            return super().load_state_dict(state_dict, strict)
+        except RuntimeError as e:
+            msg = e.args[0]
+            keys = map(lambda k: k[1:-1], re.findall(r'"[^"]*"', msg))
+            for k in keys:
+                del state_dict[k]
+            return super().load_state_dict(state_dict, strict)
+
+    def __construct_camera(self, print_info=True):
         hparams = self.hparams
         self.crop_width = hparams.crop_width
 
@@ -252,31 +273,34 @@ class SnapshotDepth(pl.LightningModule):
             'requires_grad': hparams.optimize_optics,
             'loss_items': hparams.loss_items or ()
         }
-        if hparams.camera_type == 'b-spline':
-            camera_recipe.update({
-                'double_precision': hparams.double_precision,
-                "degrees": [hparams.bspline_degree] * 2,
-                "grid_size": [hparams.bspline_grid_size] * 2,
-                'lattice_focal_init': hparams.lattice_focal_init
-            })
-            self.camera = bsac.BSplineApertureCamera(**camera_recipe)
-        elif hparams.camera_type == 'rotationally-symmetric':
+        if hparams.camera_type == 'rotationally-symmetric':
             camera_recipe.update({
                 'full_size': hparams.full_size,
                 'aperture_upsample_factor': hparams.mask_upsample_factor,
                 'aperture_size': hparams.mask_sz,
             })
             self.camera = rsc.RotationallySymmetricCamera(**camera_recipe)
-        elif hparams.camera_type == 'zernike':
+        else:
             camera_recipe.update({
                 'double_precision': hparams.double_precision,
-                'degree': hparams.zernike_degree,
-                'lattice_focal_init': hparams.lattice_focal_init
+                'lattice_focal_init': hparams.lattice_focal_init,
+                'effective_psf_factor': hparams.effective_psf_factor
             })
-            self.camera = optics.zernike.ZernikeApertureCamera(**camera_recipe)
-        else:
-            raise ValueError(f'Unknown camera type: {hparams.camera_type}')
-        print(self.camera)
+            if hparams.camera_type == 'b-spline':
+                camera_recipe.update({
+                    "degrees": [hparams.bspline_degree] * 2,
+                    "grid_size": [hparams.bspline_grid_size] * 2
+                })
+                self.camera = bsac.BSplineApertureCamera(**camera_recipe)
+            elif hparams.camera_type == 'zernike':
+                camera_recipe.update({
+                    'degree': hparams.zernike_degree,
+                })
+                self.camera = optics.zernike.ZernikeApertureCamera(**camera_recipe)
+            else:
+                raise ValueError(f'Unknown camera type: {hparams.camera_type}')
+        if print_info:
+            print(self.camera)
 
     def __step_common(
         self, data: dataset.ImageItem, mask: bool = False
@@ -382,9 +406,9 @@ class SnapshotDepth(pl.LightningModule):
         return parser
 
     @staticmethod
-    def construct_from_checkpoint(ckpt):
+    def construct_from_checkpoint(ckpt, print_info=False):
         hparams = ckpt['hyper_parameters']
-        model = SnapshotDepth(hparams)
+        model = SnapshotDepth(hparams, print_info=print_info)
         model.camera.load_state_dict(ckpt['state_dict'])
         model.decoder.load_state_dict({
             key[8:]: value

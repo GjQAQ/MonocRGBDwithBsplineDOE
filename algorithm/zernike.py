@@ -1,6 +1,10 @@
+import functools
+
 import torch
 
 from scipy.special import comb
+from scipy.linalg import lstsq
+import matplotlib.pyplot as plt
 
 
 def fit_with_matrix(mat: torch.Tensor, c: torch.Tensor, size=None) -> torch.Tensor:
@@ -44,3 +48,35 @@ def radial_component(r: torch.Tensor, n: int, k: int) -> torch.Tensor:
             coef = -coef
         res += coef * r ** (n - 2 * s)
     return res
+
+
+def fit_coefficients(mat, value) -> torch.Tensor:
+    return torch.tensor(lstsq(mat, torch.flatten(value))[0])
+
+
+# test
+if __name__ == '__main__':
+    size = 100
+    seq = torch.linspace(-1, 1, size)
+    x = seq[None, :]
+    y = torch.flip(seq[:, None], (0,))
+    r = torch.sqrt(x ** 2 + y ** 2)
+    t = torch.atan2(y, x)
+    z = functools.partial(zernike_basis, r, t)
+
+    # for i in range(1, 5):
+    #     for j in range(i + 1):
+    #         plt.imshow(z(i, j))
+    #         plt.show()
+
+    m = make_matrix(r, t, 3)
+    summary = []
+    for i in range(10):
+        c = torch.zeros(10, 1)
+        c[i, 0] = 1
+        y = fit_with_matrix(m, c, (size, size))
+        summary.append(torch.allclose(c, fit_coefficients(m, y)[:, None], 0, 1e-5))
+
+        # plt.imshow(y)
+        # plt.show()
+    print(summary)

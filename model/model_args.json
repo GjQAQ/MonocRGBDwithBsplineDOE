@@ -26,11 +26,15 @@
   },
   "optics_lr": {
     "type": "float",
-    "default": 2e-9
+    "default": 1e-9
   },
   "batch_sz": {
     "type": "int",
     "default": 1
+  },
+  "norm": {
+    "type": "str",
+    "default": "BN"
   },
   "num_workers": {
     "type": "int",
@@ -76,6 +80,10 @@
   "psf_size": {
     "type": "int",
     "default": 64
+  },
+  "effective_psf_factor": {
+    "type": "int",
+    "default": 2
   },
   "image_sz": {
     "type": "int",

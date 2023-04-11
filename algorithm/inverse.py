@@ -6,13 +6,19 @@ import utils
 import torch.fft as fft
 
 
+def __weight(x: torch.Tensor) -> torch.Tensor:
+    a = myfft.autocorrelation1d(x.sum(dim=-2, keepdim=False)).unsqueeze(-2)
+    b = myfft.autocorrelation1d(x.sum(dim=-1, keepdim=False)).unsqueeze(-1)
+    return (1 - a) * (1 - b)
+
+
 def __edgetaper3d(img: torch.Tensor, psf: torch.Tensor) -> torch.Tensor:
     if img.dim() != 4:
         raise ValueError(f'Wrong dimensions of img: {img.dim()}(4 expected)')
     if psf.dim() != 5:
         raise ValueError(f'Wrong dimensions of psf: {psf.dim()}(5 expected)')
     psf = psf.mean(dim=-3)
-    alpha = myfft.autocorrelation2d_sym(psf)
+    alpha = __weight(psf)
     blurred_img = fft.irfftn(myfft.rfft2(img) * myfft.rfft2(psf), img.size())
     return alpha * img + (1 - alpha) * blurred_img
 

@@ -4,12 +4,14 @@ import torch
 import numpy as np
 
 import optics
+import utils
 import utils.old_complex as old_complex
 import utils.fft as fft
+import optics.kernel as kn
 
 
 class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
-    def __init__(self, double_precision: bool = True, **kwargs):
+    def __init__(self, effective_psf_factor, double_precision: bool = True, **kwargs):
         r"""
         Construct camera model with a DOE(Diffractive Optical Element) on its aperture.
         The height of DOE :math:`h(u,v)` is given by method heightmap,
@@ -20,6 +22,7 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
         super().__init__(**kwargs)
 
         self.__double = double_precision
+        self.__psf_factor = effective_psf_factor
 
         const = self.camera_pitch / self.sensor_distance
         self.__scale_factor = int(torch.ceil(
@@ -38,6 +41,16 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def lattice_focal_init(self):
         pass
+
+    def prepare_lattice_focal_init(self):
+        slope_range = kn.get_slope_range(*self.depth_range)
+        n = (self.aperture_diameter * slope_range
+             / (2 * kn.get_delta(self.camera_pitch, self.focal_length, self.focal_depth))) ** (1 / 3)
+        n = max(5, round(n))
+        if n < 2:
+            raise ValueError(f'Wrong subsquare number: {n}')
+        wl = self.buf_wavelengths[self.n_wavelengths // 2]
+        return slope_range, n, wl
 
     def psf(self, scene_distances, modulate_phase):
         r_sqr = self.buf_r_sqr.unsqueeze(1)  # n_wl x D x N_u x N_v
@@ -65,7 +78,8 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
         psf /= (wl * self.sensor_distance) ** 2
         if self.__double:
             psf = psf.float()
-        return fft.fftshift(psf, (-1, -2))
+        psf = fft.fftshift(psf, (-1, -2))
+        return utils.pad_or_crop(psf, self._image_size)
 
     def heightmap(self, use_cache=False) -> torch.Tensor:
         if not use_cache or self.__heightmap_history is None:
@@ -91,9 +105,9 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
     @property
     def interval(self):
         sample_range = self.buf_wavelengths[:, None] * self.sensor_distance / self.camera_pitch
-        return sample_range / torch.tensor([self._image_size], device=self.device)
+        return sample_range * self.__psf_factor / torch.tensor([self._image_size], device=self.device)
 
     def __uv_grid(self, dim):
-        n = self._image_size[dim] * self.__scale_factor
+        n = self._image_size[dim] * self.__scale_factor // self.__psf_factor
         x = torch.linspace(-n / 2, n / 2, n).reshape((1, -1)) * self.interval[:, [dim]]  # n_wl x N
         return x[:, None, :] if dim == 1 else x[:, :, None]

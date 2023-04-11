@@ -55,7 +55,6 @@ def prepare_data(hparams):
     sf_val_dataset = data.Subset(sf_val_dataset, range(val_idx))
 
     if hparams.mix_dualpixel_dataset:
-        pass
         dp_train_dataset = dualpixel(partition='train', is_training=True)
         dp_val_dataset = dualpixel(partition='val', is_training=False)
 
