@@ -146,5 +146,5 @@ if __name__ == '__main__':
     else:
         raise ValueError(f'Unknown optics type: {args.type}')
 
-    # spectrum = spectrum ** 0.5
+    spectrum = spectrum ** 0.5
     show_spectrum(spectrum.detach())

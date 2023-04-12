@@ -46,7 +46,7 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
         slope_range = kn.get_slope_range(*self.depth_range)
         n = (self.aperture_diameter * slope_range
              / (2 * kn.get_delta(self.camera_pitch, self.focal_length, self.focal_depth))) ** (1 / 3)
-        n = max(5, round(n))
+        n = max(3, round(n))
         if n < 2:
             raise ValueError(f'Wrong subsquare number: {n}')
         wl = self.buf_wavelengths[self.n_wavelengths // 2]

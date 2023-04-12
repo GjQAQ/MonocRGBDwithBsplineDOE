@@ -55,10 +55,11 @@ def model_eval(args, ckpt_path, device='cpu'):
     hparams['noise_sigma_min'] = 0
     hparams['noise_sigma_max'] = 0
     hparams['lattice_focal_init'] = False
-    # hparams['image_sz'] = 512
     hparams.setdefault('effective_psf_factor', 2)
     hparams.setdefault('dynamic_conv', False)
     hparams.setdefault('norm', 'BN')
+    if args.override:
+        hparams.update(eval(args.override))
 
     if sf is None:
         image_sz = hparams['image_sz']
@@ -160,5 +161,6 @@ if __name__ == '__main__':
     parser.add_argument('--batch_sz', type=int, default=4)
     parser.add_argument('--output', type=str, default='')
     parser.add_argument('--metrics', type=str, nargs='+')
+    parser.add_argument('--override', type=str, default='')
 
     main(parser.parse_args())
