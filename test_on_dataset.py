@@ -1,8 +1,9 @@
+import sys
 import shutup
 
 shutup.please()  # shield Pillow warning
+sys.path.append('pytorch-ssim')  # use pytorch-ssim by https://github.com/Po-Hsun-Su/pytorch-ssim.git
 
-import sys
 import re
 import argparse
 import os
@@ -13,6 +14,7 @@ import torch.nn.functional as functional
 from torch.utils.data.dataset import Dataset
 from tqdm import tqdm
 from tabulate import tabulate
+import pytorch_ssim
 
 from dataset.sceneflow import SceneFlow
 from dataset.dualpixel import DualPixel
@@ -20,13 +22,31 @@ from model.snapshotdepth import SnapshotDepth
 
 sf: Dataset = None
 dp: Dataset = None
+floatfmt = '.3g'
 metrics = {
     'img_mae': lambda est, target: functional.l1_loss(est, target).item(),
     'img_psnr': lambda est, target: -10 * torch.log10(functional.mse_loss(est, target)).item(),
-    # 'img_ssim':lambda est,target:est,
+    'img_ssim': lambda est, target: pytorch_ssim.ssim(est, target),
     'depth_mae': lambda est, target: functional.l1_loss(est, target).item(),
     'depth_rmse': lambda est, target: torch.sqrt(functional.mse_loss(est, target)).item()
 }
+
+
+def md_annotate(table, metric_list):
+    data = []
+    for row in table:
+        data.append(row[1:])
+    data = torch.tensor(data)
+    filt = torch.zeros(data.shape[1], dtype=torch.bool)
+    for i, m in enumerate(metric_list):
+        if m.find('psnr') != -1 or m.find('ssim') != -1:
+            filt[i] = True
+    indices = torch.where(filt, torch.argmax(data, 0), torch.argmin(data, 0))
+    for i in range(len(table)):
+        for j in range(1, len(table[0])):
+            formatted = ('{:' + floatfmt + '}').format(table[i][j])
+            table[i][j] = f'**{formatted}**' if indices[j - 1] == i else formatted
+    return table
 
 
 @torch.no_grad()
@@ -140,10 +160,16 @@ def main(args):
     results = []
     for path, name in zip(ckpt_paths, ckpt_names):
         results.append([name] + model_eval(args, path, device=args.device))
+    if args.format == 'markdown':
+        results = md_annotate(results, args.metrics)
+
     output.write(f'version: {args.ckpt_version}\n')
     output.write(tabulate(
-        results, ['name'] + args.metrics,
-        floatfmt='.3g'
+        results,
+        headers=['name'] + args.metrics,
+        tablefmt='pipe' if args.format == 'markdown' else 'simple',
+        floatfmt=floatfmt,
+        colalign=['center'] * len(results[0])
     ))
     output.write('\n')
     if args.output:
@@ -162,5 +188,6 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=str, default='')
     parser.add_argument('--metrics', type=str, nargs='+')
     parser.add_argument('--override', type=str, default='')
+    parser.add_argument('--format', type=str, default='default')
 
     main(parser.parse_args())
