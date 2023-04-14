@@ -1,3 +1,4 @@
+import typing
 from typing import Union, Dict
 import math
 
@@ -103,6 +104,19 @@ class RotationallySymmetricCamera(optics.base.Camera):
 
     def feature_parameters(self):
         return {'heightmap1d': self.__heightmap1d.data}
+
+    @classmethod
+    def extract_parameters(cls, hparams, **kwargs) -> typing.Dict:
+        if hparams.initialization_type != 'default':
+            raise ValueError(f'Unsupported initialization type: {hparams.initialization_type}')
+
+        base = super().extract_parameters(hparams, **kwargs)
+        base.update({
+            'full_size': hparams.full_size,
+            'aperture_upsample_factor': hparams.mask_upsample_factor,
+            'aperture_size': hparams.mask_sz,
+        })
+        return base
 
     def specific_log(self, *args, **kwargs):
         log = super().specific_log(*args, **kwargs)

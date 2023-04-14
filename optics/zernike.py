@@ -1,3 +1,4 @@
+import typing
 from typing import Union, Dict
 
 import torch
@@ -16,7 +17,7 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
         self,
         degree: int = 10,
         requires_grad: bool = False,
-        lattice_focal_init=False,
+        init_type='default',
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -24,11 +25,16 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
         linear = (degree + 1) * (degree + 2) // 2
         self.__degree = degree
 
-        if lattice_focal_init:
+        if init_type == 'lattice_focal':
             init = self.lattice_focal_init()
+        elif init_type.startswith('existent'):
+            ckpt = torch.load(init_type[9:], map_location=lambda storage, loc: storage)
+            self.load_state_dict(ckpt['state_dict'])
+            init = None
         else:
             init = torch.zeros(linear)
-        self.__coefficients = torch.nn.Parameter(init, requires_grad=requires_grad)
+        if init is not None:
+            self.__coefficients = torch.nn.Parameter(init, requires_grad=requires_grad)
 
         r = torch.sqrt(self.buf_r_sqr) / (self.aperture_diameter / 2)  # n_wl x N_u x N_v
         r = torch.clamp(r, 0, 1)
@@ -94,3 +100,15 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
 
     def load_state_dict(self, state_dict: Union[Dict[str, Tensor], Dict[str, Tensor]], strict: bool = True):
         self.__coefficients.data = state_dict['zernike_coefficients']
+
+    @classmethod
+    def extract_parameters(cls, hparams, **kwargs) -> typing.Dict:
+        it = hparams.initialization_type
+        if it not in ('default', 'lattice_focal') and not it.startswith('existent'):
+            raise ValueError(f'Unsupported initialization type: {it}')
+
+        base = super().extract_parameters(hparams, **kwargs)
+        base.update({
+            'degree': hparams.zernike_degree,
+        })
+        return base

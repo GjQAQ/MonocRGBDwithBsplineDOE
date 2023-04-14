@@ -1,4 +1,5 @@
 import abc
+import typing
 
 import torch
 import numpy as np
@@ -106,6 +107,15 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
     def interval(self):
         sample_range = self.buf_wavelengths[:, None] * self.sensor_distance / self.camera_pitch
         return sample_range * self.__psf_factor / torch.tensor([self._image_size], device=self.device)
+
+    @classmethod
+    def extract_parameters(cls, hparams, **kwargs) -> typing.Dict:
+        base = super().extract_parameters(hparams, **kwargs)
+        base.update({
+            'double_precision': hparams.double_precision,
+            'effective_psf_factor': hparams.effective_psf_factor
+        })
+        return base
 
     def __uv_grid(self, dim):
         n = self._image_size[dim] * self.__scale_factor // self.__psf_factor

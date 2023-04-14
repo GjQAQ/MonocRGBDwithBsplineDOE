@@ -138,6 +138,10 @@
     "type": "str",
     "default": "b-spline"
   },
+  "initialization_type": {
+    "type": "str",
+    "default": "default"
+  },
   "mask_sz": {
     "type": "int",
     "default": 8000
@@ -171,7 +175,6 @@
     "log_misc": false,
     "double_precision": false,
     "dynamic_conv": true,
-    "lattice_focal_init": false,
     "psfjitter": {
       "dest": "psf_jitter",
       "default": true

@@ -114,6 +114,24 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
     def feature_parameters(self) -> typing.Dict:
         pass
 
+    @classmethod
+    def extract_parameters(cls, hparams, **kwargs) -> typing.Dict:
+        return {
+            'wavelengths': (632e-9, 550e-9, 450e-9),
+            'min_depth': hparams.min_depth,
+            'max_depth': hparams.max_depth,
+            'focal_depth': hparams.focal_depth,
+            'n_depths': hparams.n_depths,
+            'image_size': hparams.image_sz + 4 * hparams.crop_width,
+            'camera_pitch': hparams.camera_pixel_pitch,
+            'focal_length': hparams.focal_length,
+            'aperture_diameter': hparams.focal_length / hparams.f_number,
+            'diffraction_efficiency': hparams.diffraction_efficiency,
+            'requires_grad': hparams.optimize_optics,
+            'loss_items': hparams.loss_items or (),
+            'init_type': hparams.initialization_type
+        }
+
     def extra_repr(self):
         return f'''
 Camera module...

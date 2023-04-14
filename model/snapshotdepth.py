@@ -15,20 +15,19 @@ import torchvision.utils
 import debayer
 from torch import Tensor
 
-import optics.zernike
 from reconstruction.reconstructor import Reconstructor
 from .vgg16loss import Vgg16PerceptualLoss
 import dataset
 import utils
 import algorithm.inverse as inverse
-import optics.bsac as bsac
-import optics.rsc as rsc
+import optics
 
 
-def _gray_to_rgb(x):
-    return x.repeat(1, 3, 1, 1)
-
-
+optics_models = {
+    'rotationally-symmetric': optics.RotationallySymmetricCamera,
+    'b-spline': optics.BSplineApertureCamera,
+    'zernike': optics.ZernikeApertureCamera
+}
 FinalOutput = collections.namedtuple(
     'FinalOutput',
     [
@@ -38,6 +37,10 @@ FinalOutput = collections.namedtuple(
         'psf'
     ]
 )
+
+
+def _gray_to_rgb(x):
+    return x.repeat(1, 3, 1, 1)
 
 
 class SnapshotDepth(pl.LightningModule):
@@ -81,7 +84,14 @@ class SnapshotDepth(pl.LightningModule):
         self.image_lossfn = Vgg16PerceptualLoss()
         self.depth_lossfn = torch.nn.L1Loss()
 
-        self.__construct_camera(print_info)
+        self.crop_width = self.hparams.crop_width
+        if self.hparams.camera_type in optics_models:
+            camera_class = optics_models[self.hparams.camera_type]
+            self.camera = camera_class(camera_class.extract_parameters(self.hparams))
+        else:
+            raise ValueError(f'Unknown camera type: {hparams.camera_type}')
+        if print_info:
+            print(self.camera)
 
     def configure_optimizers(self):
         return optim.Adam([
@@ -254,53 +264,6 @@ class SnapshotDepth(pl.LightningModule):
             for k in keys:
                 del state_dict[k]
             return super().load_state_dict(state_dict, strict)
-
-    def __construct_camera(self, print_info=True):
-        hparams = self.hparams
-        self.crop_width = hparams.crop_width
-
-        camera_recipe = {
-            'wavelengths': (632e-9, 550e-9, 450e-9),
-            'min_depth': hparams.min_depth,
-            'max_depth': hparams.max_depth,
-            'focal_depth': hparams.focal_depth,
-            'n_depths': hparams.n_depths,
-            'image_size': hparams.image_sz + 4 * self.crop_width,
-            'camera_pitch': hparams.camera_pixel_pitch,
-            'focal_length': hparams.focal_length,
-            'aperture_diameter': hparams.focal_length / hparams.f_number,
-            'diffraction_efficiency': hparams.diffraction_efficiency,
-            'requires_grad': hparams.optimize_optics,
-            'loss_items': hparams.loss_items or ()
-        }
-        if hparams.camera_type == 'rotationally-symmetric':
-            camera_recipe.update({
-                'full_size': hparams.full_size,
-                'aperture_upsample_factor': hparams.mask_upsample_factor,
-                'aperture_size': hparams.mask_sz,
-            })
-            self.camera = rsc.RotationallySymmetricCamera(**camera_recipe)
-        else:
-            camera_recipe.update({
-                'double_precision': hparams.double_precision,
-                'lattice_focal_init': hparams.lattice_focal_init,
-                'effective_psf_factor': hparams.effective_psf_factor
-            })
-            if hparams.camera_type == 'b-spline':
-                camera_recipe.update({
-                    "degrees": [hparams.bspline_degree] * 2,
-                    "grid_size": [hparams.bspline_grid_size] * 2
-                })
-                self.camera = bsac.BSplineApertureCamera(**camera_recipe)
-            elif hparams.camera_type == 'zernike':
-                camera_recipe.update({
-                    'degree': hparams.zernike_degree,
-                })
-                self.camera = optics.zernike.ZernikeApertureCamera(**camera_recipe)
-            else:
-                raise ValueError(f'Unknown camera type: {hparams.camera_type}')
-        if print_info:
-            print(self.camera)
 
     def __step_common(
         self, data: dataset.ImageItem, mask: bool = False

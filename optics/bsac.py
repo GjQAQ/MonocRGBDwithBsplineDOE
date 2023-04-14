@@ -1,3 +1,4 @@
+import typing
 from typing import Union, Dict
 
 import torch
@@ -28,7 +29,7 @@ class BSplineApertureCamera(optics.ClassicCamera):
         knot_vectors=None,
         degrees=(3, 3),
         requires_grad: bool = False,
-        lattice_focal_init=False,
+        init_type='default',
         **kwargs
     ):
         r"""
@@ -58,11 +59,16 @@ class BSplineApertureCamera(optics.ClassicCamera):
         self.__grid_size = grid_size
         self.__knot_vectors = knot_vectors
 
-        if lattice_focal_init:
+        if init_type == 'lattice_focal':
             init = self.lattice_focal_init()
+        elif init_type.startswith('existent'):
+            ckpt = torch.load(init_type[9:], map_location=lambda storage, loc: storage)
+            self.load_state_dict(ckpt['state_dict'])
+            init = None
         else:
             init = torch.zeros(grid_size)
-        self.__control_points = torch.nn.Parameter(init, requires_grad=requires_grad)
+        if init is not None:
+            self.__control_points = torch.nn.Parameter(init, requires_grad=requires_grad)
 
         # buffered tensors used to compute heightmap in psf
         self.register_buffer('buf_u_matrix', self.__design_matrix(1))
@@ -127,6 +133,19 @@ class BSplineApertureCamera(optics.ClassicCamera):
 
     def load_state_dict(self, state_dict: Union[Dict[str, Tensor], Dict[str, Tensor]], strict: bool = True):
         self.__control_points.data = state_dict['control_points']
+
+    @classmethod
+    def extract_parameters(cls, hparams, **kwargs) -> typing.Dict:
+        it = hparams.initialization_type
+        if it not in ('default', 'lattice_focal') and not it.startswith('existent'):
+            raise ValueError(f'Unsupported initialization type: {it}')
+
+        base = super().extract_parameters(hparams, **kwargs)
+        base.update({
+            "degrees": [hparams.bspline_degree] * 2,
+            "grid_size": [hparams.bspline_grid_size] * 2
+        })
+        return base
 
     def __scale_coordinate(self, x):
         x = x / self.aperture_diameter + 0.5
