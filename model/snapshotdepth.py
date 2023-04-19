@@ -87,7 +87,7 @@ class SnapshotDepth(pl.LightningModule):
         self.crop_width = self.hparams.crop_width
         if self.hparams.camera_type in optics_models:
             camera_class = optics_models[self.hparams.camera_type]
-            self.camera = camera_class(camera_class.extract_parameters(self.hparams))
+            self.camera = camera_class(**camera_class.extract_parameters(self.hparams))
         else:
             raise ValueError(f'Unknown camera type: {hparams.camera_type}')
         if print_info:

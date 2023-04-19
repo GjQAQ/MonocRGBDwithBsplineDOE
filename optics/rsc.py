@@ -39,6 +39,7 @@ class RotationallySymmetricCamera(optics.base.Camera):
         full_size=100,
         aperture_upsample_factor=1,
         requires_grad: bool = False,
+        init_type='default',
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -52,6 +53,10 @@ class RotationallySymmetricCamera(optics.base.Camera):
 
         self.__rho_sampling_full = None
         self.__ind_full = None
+
+        if init_type.startswith('existent'):
+            ckpt = torch.load(init_type[9:], map_location=lambda storage, loc: storage)
+            self.load_state_dict(ckpt['state_dict'])
 
         self.__build_camera()
 

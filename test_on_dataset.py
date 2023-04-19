@@ -14,7 +14,9 @@ import torch.nn.functional as functional
 from torch.utils.data.dataset import Dataset
 from tqdm import tqdm
 from tabulate import tabulate
+from scipy.stats import rankdata
 import pytorch_ssim
+import numpy as np
 
 from dataset.sceneflow import SceneFlow
 from dataset.dualpixel import DualPixel
@@ -26,10 +28,11 @@ floatfmt = '.3g'
 metrics = {
     'img_mae': lambda est, target: functional.l1_loss(est, target).item(),
     'img_psnr': lambda est, target: -10 * torch.log10(functional.mse_loss(est, target)).item(),
-    'img_ssim': lambda est, target: pytorch_ssim.ssim(est, target),
+    'img_ssim': lambda est, target: pytorch_ssim.ssim(est, target).item(),
     'depth_mae': lambda est, target: functional.l1_loss(est, target).item(),
     'depth_rmse': lambda est, target: torch.sqrt(functional.mse_loss(est, target)).item()
 }
+greater_better = ('img_psnr', 'img_ssim')
 
 
 def md_annotate(table, metric_list):
@@ -39,7 +42,7 @@ def md_annotate(table, metric_list):
     data = torch.tensor(data)
     filt = torch.zeros(data.shape[1], dtype=torch.bool)
     for i, m in enumerate(metric_list):
-        if m.find('psnr') != -1 or m.find('ssim') != -1:
+        if m in greater_better:
             filt[i] = True
     indices = torch.where(filt, torch.argmax(data, 0), torch.argmin(data, 0))
     for i in range(len(table)):
@@ -47,6 +50,39 @@ def md_annotate(table, metric_list):
             formatted = ('{:' + floatfmt + '}').format(table[i][j])
             table[i][j] = f'**{formatted}**' if indices[j - 1] == i else formatted
     return table
+
+
+def rank_select(table, metric_list):
+    data = []
+    for row in table:
+        data.append(row[1:])
+    data = np.array(data)
+    rank = np.where(
+        np.array(list(map(lambda m: m in greater_better, metric_list)))[None, ...],
+        rankdata(-data, 'average', axis=0),
+        rankdata(data, 'average', axis=0)
+    )
+    rank = np.sum(rank, axis=1)
+    return np.argmin(rank)
+
+
+def norm_select(table, metric_list):
+    data = []
+    for row in table:
+        data.append(row[1:])
+    data = np.array(data)
+    score = (data - np.mean(data, 0, keepdims=True)) / np.sqrt(np.var(data, 0, keepdims=True) + 1e-10)
+    score = np.where(
+        np.array(list(map(lambda m: m in greater_better, metric_list)))[None, ...],
+        score, -score
+    )
+    return np.argmax(np.sum(score, axis=1))
+
+
+criteria = {
+    'rank': rank_select,
+    'norm': norm_select
+}
 
 
 @torch.no_grad()
@@ -77,6 +113,7 @@ def model_eval(args, ckpt_path, device='cpu'):
     hparams['lattice_focal_init'] = False
     hparams.setdefault('effective_psf_factor', 2)
     hparams.setdefault('dynamic_conv', False)
+    hparams.setdefault('initialization_type', 'default')
     hparams.setdefault('norm', 'BN')
     if args.override:
         hparams.update(eval(args.override))
@@ -144,6 +181,8 @@ def main(args):
     for m in args.metrics:
         if m not in metrics:
             raise ValueError(f'Unknown metric: {m}')
+    if args.criterion not in criteria:
+        raise ValueError(f'Unknown selection criterion: {args.criterion}')
 
     ckpt_dir = os.path.join('log', args.experiment_name, f'version_{args.ckpt_version}')
     if args.ckpt_file:
@@ -160,8 +199,11 @@ def main(args):
     results = []
     for path, name in zip(ckpt_paths, ckpt_names):
         results.append([name] + model_eval(args, path, device=args.device))
+    best_one = criteria[args.criterion](results, args.metrics)
     if args.format == 'markdown':
         results = md_annotate(results, args.metrics)
+    results.append([_ for _ in results[best_one]])
+    results[-1][0] = f'best:{results[-1][0]}'
 
     output.write(f'version: {args.ckpt_version}\n')
     output.write(tabulate(
@@ -189,5 +231,6 @@ if __name__ == '__main__':
     parser.add_argument('--metrics', type=str, nargs='+')
     parser.add_argument('--override', type=str, default='')
     parser.add_argument('--format', type=str, default='default')
+    parser.add_argument('--criterion', type=str, default='norm')
 
     main(parser.parse_args())

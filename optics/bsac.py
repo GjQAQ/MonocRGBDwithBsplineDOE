@@ -7,7 +7,6 @@ import numpy as np
 import scipy.interpolate as intp
 
 import optics
-import optics.kernel as kn
 import utils.fft as fft
 import algorithm
 
