@@ -299,6 +299,10 @@ Input image size: {self._image_size}
     def loss_items(self):
         return self.__loss_items
 
+    def _scale_coordinate(self, x):
+        x = x / self.aperture_diameter + 0.5
+        return torch.clamp(x, 0, 1)
+
     def __register_wavlength(self, wavelengths):
         if isinstance(wavelengths, tuple):
             wavelengths = torch.tensor(wavelengths)

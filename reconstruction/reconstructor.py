@@ -13,6 +13,16 @@ ReconstructionOutput = collections.namedtuple('ReconstructionOutput', ['est_img'
 
 
 class Reconstructor(nn.Module):
+    """
+    A reconstructor for image received by sensor directly.
+    Composed of three module: an input layer, Res-UNet and an output layer.
+    Input:
+        1. Captured image (B x C x H x W)
+        2. Pre-inversed image volume (B x C x D x H x W)
+    Output:
+        1. Reconstructed image (B x 3 x H x W)
+        2. Estimated depthmap (B x 1 x H x W)
+    """
     def __init__(
         self,
         dynamic_conv: bool,
@@ -36,17 +46,18 @@ class Reconstructor(nn.Module):
         )
         if not preinverse:
             input_layer = nn.Sequential(
-                nn.Conv2d(CH_RGB, ch_pin, kernel_size=1, bias=False),
+                convblock(CH_RGB, ch_pin, kernel_size=1, bias=False),
                 nn.BatchNorm2d(ch_pin),
                 nn.ReLU(),
                 input_layer
             )
-        output_layer = nn.Sequential(
-            nn.Conv2d(ch_base, CH_RGB + CH_DEPTH, kernel_size=1, bias=True)
-        )
+        output_blocks = [nn.Conv2d(ch_base, CH_RGB + CH_DEPTH, kernel_size=1, bias=True)]
+        if dynamic_conv:
+            output_blocks.append(nn.BatchNorm2d(CH_RGB + CH_DEPTH))
+        output_layer = nn.Sequential(*output_blocks)
         self.__decoder = nn.Sequential(
             input_layer,
-            unet.UNet([ch_base, ch_base, 2 * ch_base, 2 * ch_base, 4 * ch_base], norm_layer, False),
+            unet.UNet([ch_base, ch_base, 2 * ch_base, 2 * ch_base, 4 * ch_base], norm_layer, dynamic_conv),
             output_layer,
         )
 

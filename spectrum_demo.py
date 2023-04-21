@@ -32,6 +32,7 @@ def show_spectrum(spectrum):
 
 def load_trained_lens(ckpt_path) -> optics.BSplineApertureCamera:
     ckpt = torch.load(ckpt_path, map_location=lambda storage, loc: storage)
+    ckpt['hyper_parameters']['initialization_type'] = 'default'
     ckpt['hyper_parameters']['lattice_focal_init'] = True
     ckpt['hyper_parameters']['dynamic_conv'] = False
     ckpt['hyper_parameters']['effective_psf_factor'] = 1

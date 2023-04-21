@@ -99,8 +99,8 @@ class BSplineApertureCamera(optics.ClassicCamera):
         c = self.__control_points.cpu()[None, None, ...]
 
         r2 = u ** 2 + v ** 2
-        u = self.__scale_coordinate(u).squeeze(-2)  # 1 x omega_x x t1
-        v = self.__scale_coordinate(v).squeeze(-1)  # omega_y x 1 x t2
+        u = self._scale_coordinate(u).squeeze(-2)  # 1 x omega_x x t1
+        v = self._scale_coordinate(v).squeeze(-1)  # omega_y x 1 x t2
         u_mat = self.__design_matrices(u, c.shape[-2], self.__knot_vectors[0], self.__degrees[0])
         v_mat = self.__design_matrices(v, c.shape[-1], self.__knot_vectors[1], self.__degrees[1])
         h = self.__heightmap(u_mat, v_mat, c)
@@ -146,15 +146,11 @@ class BSplineApertureCamera(optics.ClassicCamera):
         })
         return base
 
-    def __scale_coordinate(self, x):
-        x = x / self.aperture_diameter + 0.5
-        return torch.clamp(x, 0, 1)
-
     def __design_matrix(self, dim):
         n, kv, p = self._image_size[dim], self.__knot_vectors[dim], self.__degrees[dim]
         x = torch.flatten(self.u_axis if dim == 1 else self.v_axis, -2, -1)
 
-        x = self.__scale_coordinate(x)
+        x = self._scale_coordinate(x)
         m = torch.stack([torch.from_numpy(design_matrix(x[i].numpy(), kv, p)) for i in range(x.shape[0])])
         return m  # n_wl x N x n_ctrl
 

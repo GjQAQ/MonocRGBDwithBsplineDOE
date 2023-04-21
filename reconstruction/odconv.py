@@ -1,13 +1,27 @@
+"""
+todo
+"""
 # remove: Attention._initialize_weights
+# make activation in Attention selectable
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as functional
 import torch.autograd
 
 
 class Attention(nn.Module):
-    def __init__(self, in_planes, out_planes, kernel_size, groups=1, reduction=0.0625, kernel_num=4, min_channel=16):
+    def __init__(
+        self,
+        in_planes,
+        out_planes,
+        kernel_size,
+        groups=1,
+        reduction=0.0625,
+        kernel_num=4,
+        min_channel=16,
+        activation=nn.ReLU
+    ):
         super(Attention, self).__init__()
         attention_channel = max(int(in_planes * reduction), min_channel)
         self.kernel_size = kernel_size
@@ -17,7 +31,7 @@ class Attention(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Conv2d(in_planes, attention_channel, 1, bias=False)
         self.bn = nn.BatchNorm2d(attention_channel)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = activation(inplace=True)
 
         self.channel_fc = nn.Conv2d(attention_channel, in_planes, 1, bias=True)
         self.func_channel = self.get_channel_attention
@@ -62,7 +76,7 @@ class Attention(nn.Module):
 
     def get_kernel_attention(self, x):
         kernel_attention = self.kernel_fc(x).view(x.size(0), -1, 1, 1, 1, 1)
-        kernel_attention = F.softmax(kernel_attention / self.temperature, dim=1)
+        kernel_attention = functional.softmax(kernel_attention / self.temperature, dim=1)
         return kernel_attention
 
     def forward(self, x):
@@ -74,8 +88,20 @@ class Attention(nn.Module):
 
 
 class ODConv2d(nn.Conv2d):
-    def __init__(self, in_planes, out_planes, kernel_size, stride=1, padding=0, dilation=1, groups=1,
-                 reduction=0.0625, kernel_num=4, bias=False):
+    def __init__(
+        self,
+        in_planes,
+        out_planes,
+        kernel_size,
+        stride=1,
+        padding=0,
+        dilation=1,
+        groups=1,
+        reduction=0.0625,
+        kernel_num=4,
+        bias=False,
+        attention_activation=None
+    ):
         super(ODConv2d, self).__init__(in_planes, out_planes, kernel_size)
 
         if bias:
@@ -89,11 +115,16 @@ class ODConv2d(nn.Conv2d):
         self.dilation = dilation
         self.groups = groups
         self.kernel_num = kernel_num
-        self.attention = Attention(in_planes, out_planes, kernel_size, groups=groups,
-                                   reduction=reduction, kernel_num=kernel_num)
-        self.weight = nn.Parameter(torch.randn(kernel_num, out_planes, in_planes//groups, kernel_size, kernel_size),
-                                   requires_grad=True)
+
+        self.weight = nn.Parameter(
+            torch.randn(kernel_num, out_planes, in_planes // groups, kernel_size, kernel_size), requires_grad=True
+        )
         self._initialize_weights()
+
+        actv = {'activation': attention_activation} if attention_activation else {}
+        self.attention = Attention(
+            in_planes, out_planes, kernel_size, groups=groups, reduction=reduction, kernel_num=kernel_num, **actv
+        )
 
         if self.kernel_size == 1 and self.kernel_num == 1:
             self._forward_impl = self._forward_impl_pw1x
@@ -117,8 +148,11 @@ class ODConv2d(nn.Conv2d):
         aggregate_weight = spatial_attention * kernel_attention * self.weight.unsqueeze(dim=0)
         aggregate_weight = torch.sum(aggregate_weight, dim=1).view(
             [-1, self.in_planes // self.groups, self.kernel_size, self.kernel_size])
-        output = F.conv2d(x, weight=aggregate_weight, bias=None, stride=self.stride, padding=self.padding,
-                          dilation=self.dilation, groups=self.groups * batch_size)
+        output = functional.conv2d(
+            x,
+            weight=aggregate_weight, bias=None, stride=self.stride, padding=self.padding,
+            dilation=self.dilation, groups=self.groups * batch_size
+        )
         output = output.view(batch_size, self.out_planes, output.size(-2), output.size(-1))
         output = output * filter_attention
         return output
@@ -126,8 +160,11 @@ class ODConv2d(nn.Conv2d):
     def _forward_impl_pw1x(self, x):
         channel_attention, filter_attention, spatial_attention, kernel_attention = self.attention(x)
         x = x * channel_attention
-        output = F.conv2d(x, weight=self.weight.squeeze(dim=0), bias=None, stride=self.stride, padding=self.padding,
-                          dilation=self.dilation, groups=self.groups)
+        output = functional.conv2d(
+            x,
+            weight=self.weight.squeeze(dim=0), bias=None, stride=self.stride, padding=self.padding,
+            dilation=self.dilation, groups=self.groups
+        )
         output = output * filter_attention
         return output
 

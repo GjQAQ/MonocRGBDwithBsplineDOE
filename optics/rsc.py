@@ -12,6 +12,7 @@ import optics
 import optics.base
 import utils
 import algorithm.cubicspline as cubic
+import utils.fft as fft
 
 
 def _find_index(a, v):
@@ -92,8 +93,8 @@ class RotationallySymmetricCamera(optics.base.Camera):
 
     def heightmap(self):
         heightmap1d = torch.cat([
-            self.heightmap1d.cpu(),
-            torch.zeros((self.__aperture_size // 2))
+            self.heightmap1d,
+            torch.zeros((self.__aperture_size // 2), device=self.device)
         ], dim=0)
         heightmap1d = heightmap1d.reshape(1, 1, -1)
         r_grid = torch.arange(0, self.__aperture_size, dtype=torch.double).reshape(1, -1)
@@ -105,7 +106,18 @@ class RotationallySymmetricCamera(optics.base.Camera):
         return _copy_quadruple(heightmap11).squeeze()
 
     def aberration(self, u, v, wavelength=None):
-        pass  # todo
+        if wavelength is None:
+            wavelength = self.buf_wavelengths[len(self.buf_wavelengths) / 2]
+        profile = self.heightmap1d
+
+        r2 = u ** 2 + v ** 2
+        r = torch.sqrt(r2) / (self.aperture_diameter / 2)
+        index = torch.clamp(r * len(profile), 0, len(profile) - 1) + 1e-5
+        index = index.to(dtype=torch.int64)
+        h = profile[index]
+
+        phase = optics.heightmap2phase(h, wavelength, optics.refractive_index(wavelength))
+        return self.apply_stop(torch.stack([r2, r2], -1), fft.exp2xy(1, phase))
 
     def feature_parameters(self):
         return {'heightmap1d': self.__heightmap1d.data}

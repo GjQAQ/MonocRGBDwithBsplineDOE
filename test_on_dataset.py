@@ -21,6 +21,7 @@ import numpy as np
 from dataset.sceneflow import SceneFlow
 from dataset.dualpixel import DualPixel
 from model.snapshotdepth import SnapshotDepth
+from model import FinalOutput
 
 sf: Dataset = None
 dp: Dataset = None
@@ -104,12 +105,11 @@ def get_item(dataset, img_ids, device='cpu'):
 def model_eval(args, ckpt_path, device='cpu'):
     global sf, dp
     device = torch.device(device)
+    apply_noise = args.noise == 'standard'
 
     ckpt = torch.load(ckpt_path, map_location=lambda storage, loc: storage)
     hparams: dict = ckpt['hyper_parameters']
     hparams['psf_jitter'] = False
-    hparams['noise_sigma_min'] = 0
-    hparams['noise_sigma_max'] = 0
     hparams['lattice_focal_init'] = False
     hparams.setdefault('effective_psf_factor', 2)
     hparams.setdefault('dynamic_conv', False)
@@ -117,6 +117,9 @@ def model_eval(args, ckpt_path, device='cpu'):
     hparams.setdefault('norm', 'BN')
     if args.override:
         hparams.update(eval(args.override))
+    if not apply_noise:
+        hparams['noise_sigma_min'] = 0
+        hparams['noise_sigma_max'] = 0
 
     if sf is None:
         image_sz = hparams['image_sz']
@@ -160,21 +163,23 @@ def model_eval(args, ckpt_path, device='cpu'):
 
     batch_total = len(img_ids)
     batches = img_ids if args.output else tqdm(img_ids, ncols=50, unit='batch')
+    repetition = 1 if not apply_noise else 20
     for batch in batches:
         item = get_item(dataset, batch, args.device)
-        output = model.forward(item[0], item[1], False)
+        for _ in range(repetition):
+            output: FinalOutput = model.forward(item[0], item[1], False)
+            est_depthmap = output.est_depthmap * (hparams['max_depth'] - hparams['min_depth'])
+            target_depthmap = output.target_depthmap * (hparams['max_depth'] - hparams['min_depth'])
 
-        for metric, func in metrics.items():
-            if metric.startswith('img'):
-                metric_values[metric] += func(output.est_img, output.target_img)
-            elif metric.startswith('depth'):
-                metric_values[metric] += \
-                    func(output.est_depthmap, output.target_depthmap) \
-                    * (hparams['max_depth'] - hparams['min_depth'])
+            for metric, func in metrics.items():
+                if metric.startswith('img'):
+                    metric_values[metric] += func(output.est_img, output.target_img)
+                elif metric.startswith('depth'):
+                    metric_values[metric] += func(est_depthmap, target_depthmap)
 
     if not args.output:
         print(f'Complete: {ckpt_path}')
-    return list(map(lambda m: m / batch_total, metric_values.values()))
+    return list(map(lambda m: m / (batch_total * repetition), metric_values.values()))
 
 
 def main(args):
@@ -232,5 +237,6 @@ if __name__ == '__main__':
     parser.add_argument('--override', type=str, default='')
     parser.add_argument('--format', type=str, default='default')
     parser.add_argument('--criterion', type=str, default='norm')
+    parser.add_argument('--noise', type=str, default='')
 
     main(parser.parse_args())
