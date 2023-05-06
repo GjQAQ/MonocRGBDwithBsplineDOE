@@ -61,9 +61,10 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
         u *= self.aperture_diameter / 2
         v *= self.aperture_diameter / 2
         slope_range, n, wl = self.prepare_lattice_focal_init()
-        value = algorithm.lattice_focal_heightmap(
-            *algorithm.lattice_focal_slopemap(u, v, n, slope_range, self.aperture_diameter),
-            n, self.focal_length, self.focal_depth, wl
+        value = algorithm.slope2height(
+            u, v,
+            *algorithm.slopemap(u, v, n, slope_range, self.aperture_diameter),
+            n * n, self.focal_length, self.focal_depth, wl
         )
         return z.fit_coefficients(mat, value)
 
@@ -81,7 +82,7 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
         h = z.fit_with_matrix(m, c, r.shape[-2:])
 
         phase = optics.heightmap2phase(h, wavelength, optics.refractive_index(wavelength))
-        return self.apply_stop(torch.stack([r2, r2], -1), fft.exp2xy(1, phase))
+        return self.apply_stop(fft.exp2xy(1, phase), r2=torch.stack([r2, r2], -1))
 
     @torch.no_grad()
     def heightmap_log(self, size):

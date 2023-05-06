@@ -1,6 +1,8 @@
 import sys
 import shutup
 
+import utils
+
 shutup.please()  # shield Pillow warning
 sys.path.append('pytorch-ssim')  # use pytorch-ssim by https://github.com/Po-Hsun-Su/pytorch-ssim.git
 
@@ -107,14 +109,8 @@ def model_eval(args, ckpt_path, device='cpu'):
     device = torch.device(device)
     apply_noise = args.noise == 'standard'
 
-    ckpt = torch.load(ckpt_path, map_location=lambda storage, loc: storage)
-    hparams: dict = ckpt['hyper_parameters']
+    ckpt, hparams = utils.compatible_load(ckpt_path)
     hparams['psf_jitter'] = False
-    hparams['lattice_focal_init'] = False
-    hparams.setdefault('effective_psf_factor', 2)
-    hparams.setdefault('dynamic_conv', False)
-    hparams.setdefault('initialization_type', 'default')
-    hparams.setdefault('norm', 'BN')
     if args.override:
         hparams.update(eval(args.override))
     if not apply_noise:
@@ -163,7 +159,7 @@ def model_eval(args, ckpt_path, device='cpu'):
 
     batch_total = len(img_ids)
     batches = img_ids if args.output else tqdm(img_ids, ncols=50, unit='batch')
-    repetition = 1 if not apply_noise else 20
+    repetition = 1 if not apply_noise else 5
     for batch in batches:
         item = get_item(dataset, batch, args.device)
         for _ in range(repetition):

@@ -50,15 +50,16 @@ def __old_image_formation(volume, layered_mask, psf, occlusion, eps=1e-3):
     f_volume = torch.rfft(volume, 2)
 
     if occlusion:
-        f_layered_depth = torch.rfft(layered_mask, 2)
+        with torch.no_grad():
+            f_layered_depth = torch.rfft(layered_mask, 2)
+            cumsum_alpha = torch.flip(torch.cumsum(torch.flip(layered_mask, dims=(-3,)), dim=-3), dims=(-3,))
+            f_cumsum_alpha = torch.rfft(cumsum_alpha, 2)
+
         blurred_alpha_rgb = torch.irfft(
             old_complex.multiply(f_layered_depth, f_psf), 2, signal_sizes=volume.shape[-2:])
         blurred_volume = torch.irfft(
             old_complex.multiply(f_volume, f_psf), 2, signal_sizes=volume.shape[-2:])
 
-        # Normalize the blurred intensity
-        cumsum_alpha = torch.flip(torch.cumsum(torch.flip(layered_mask, dims=(-3,)), dim=-3), dims=(-3,))
-        f_cumsum_alpha = torch.rfft(cumsum_alpha, 2)
         blurred_cumsum_alpha = torch.irfft(
             old_complex.multiply(f_cumsum_alpha, f_psf), 2, signal_sizes=volume.shape[-2:])
         blurred_volume = blurred_volume / (blurred_cumsum_alpha + eps)

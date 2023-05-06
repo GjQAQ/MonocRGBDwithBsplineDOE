@@ -44,6 +44,8 @@ class RotationallySymmetricCamera(optics.base.Camera):
         **kwargs
     ):
         super().__init__(**kwargs)
+        if self.aperture_type != 'circular':
+            raise ValueError(f'Rotationally symmetric camera supports circular aperture only')
 
         init_heightmap1d = torch.zeros(aperture_size // 2 // aperture_upsample_factor)
 
@@ -55,11 +57,11 @@ class RotationallySymmetricCamera(optics.base.Camera):
         self.__rho_sampling_full = None
         self.__ind_full = None
 
+        self.__build_camera()
+
         if init_type.startswith('existent'):
             ckpt = torch.load(init_type[9:], map_location=lambda storage, loc: storage)
             self.load_state_dict(ckpt['state_dict'])
-
-        self.__build_camera()
 
     def psf(self, scene_distances, modulate_phase):
         # As this quadruple will be copied to the other three, rho = 0 is avoided.
@@ -117,14 +119,15 @@ class RotationallySymmetricCamera(optics.base.Camera):
         h = profile[index]
 
         phase = optics.heightmap2phase(h, wavelength, optics.refractive_index(wavelength))
-        return self.apply_stop(torch.stack([r2, r2], -1), fft.exp2xy(1, phase))
+        return self.apply_stop(fft.exp2xy(1, phase), r2=torch.stack([r2, r2], -1))
 
     def feature_parameters(self):
         return {'heightmap1d': self.__heightmap1d.data}
 
     @classmethod
     def extract_parameters(cls, hparams, **kwargs) -> typing.Dict:
-        if hparams.initialization_type != 'default':
+        init_type = hparams.initialization_type
+        if init_type != 'default' and not init_type.startswith('existent'):
             raise ValueError(f'Unsupported initialization type: {hparams.initialization_type}')
 
         base = super().extract_parameters(hparams, **kwargs)

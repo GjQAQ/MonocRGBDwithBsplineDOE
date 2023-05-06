@@ -46,6 +46,7 @@ class UpSampleBlock(nn.Module):
 
         self.__block = ConvolutionBlock(ch_in, ch_out, norm_layer, conv_block)
         self.__upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        # self.__upsample = nn.ConvTranspose2d(ch_in - ch_out, ch_in - ch_out, 4, 2, 1)
 
     def forward(self, x, y):
         return self.__block(torch.cat([self.__upsample(x), y], 1))

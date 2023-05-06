@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional
 import matplotlib.pyplot as plt
 
+from .load import *
+
 
 def init_module(module: nn.Module):
     for m in module.modules():

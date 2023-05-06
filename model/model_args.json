@@ -142,6 +142,10 @@
     "type": "str",
     "default": "default"
   },
+  "aperture_type": {
+    "type": "str",
+    "default": "circular"
+  },
   "mask_sz": {
     "type": "int",
     "default": 8000

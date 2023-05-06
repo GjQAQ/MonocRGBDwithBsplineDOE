@@ -29,8 +29,8 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
         self.__scale_factor = int(torch.ceil(
             const * self.aperture_diameter / torch.min(self.buf_wavelengths)
         ).item() + 1e-5)
-        self.__u_axis = self.__uv_grid(1)
-        self.__v_axis = self.__uv_grid(0)
+        self.register_buffer('buf_u_axis', self.__uv_grid(1))
+        self.register_buffer('buf_v_axis', self.__uv_grid(0))
         self.register_buffer('buf_r_sqr', self.u_axis ** 2 + self.v_axis ** 2)
 
         self.__heightmap_history = None
@@ -54,25 +54,29 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
         return slope_range, n, wl
 
     def psf(self, scene_distances, modulate_phase):
-        r_sqr = self.buf_r_sqr.unsqueeze(1)  # n_wl x D x N_u x N_v
-        scene_distances = scene_distances.reshape(1, -1, 1, 1)
-        wl = self.buf_wavelengths.reshape(-1, 1, 1, 1)
-        if self.__double:
-            r_sqr, scene_distances, wl = r_sqr.double(), scene_distances.double(), wl.double()
+        with torch.no_grad():
+            r_sqr = self.buf_r_sqr.unsqueeze(1)  # n_wl x D x N_u x N_v
+            scene_distances = scene_distances.reshape(1, -1, 1, 1)
+            wl = self.buf_wavelengths.reshape(-1, 1, 1, 1)
+            if self.__double:
+                r_sqr, scene_distances, wl = r_sqr.double(), scene_distances.double(), wl.double()
 
-        item = r_sqr + scene_distances ** 2
-        phase1 = torch.sqrt(item) - scene_distances
-        phase2 = torch.sqrt(r_sqr + self.focal_depth ** 2) - self.focal_depth
-        phase = (phase1 - phase2) * (2 * np.pi / wl)
+            item = r_sqr + scene_distances ** 2
+            phase1 = torch.sqrt(item) - scene_distances
+            phase2 = torch.sqrt(r_sqr + self.focal_depth ** 2) - self.focal_depth
+            phase = (phase1 - phase2) * (2 * np.pi / wl)
+            amplitude = scene_distances / (wl * item)
+            amplitude = self.apply_stop(
+                amplitude,
+                x=self.u_axis.unsqueeze(1), y=self.v_axis.unsqueeze(1),
+                r2=r_sqr
+            )
+            amplitude = amplitude / amplitude.max()
+
         if modulate_phase:
             phase += optics.heightmap2phase(self.heightmap().unsqueeze(1), wl, optics.refractive_index(wl))
 
-        amplitude = scene_distances / (wl * item)
-        amplitude = self.apply_stop(r_sqr, amplitude)
-        amplitude = amplitude / amplitude.max()
-
         psf = old_complex.abs2(fft.old_fft_exp(amplitude, phase))
-        del amplitude, phase
         sf = self.__scale_factor
         psf = psf[..., sf // 2::sf, sf // 2::sf]
         psf *= torch.prod(self.interval, 1).reshape(-1, 1, 1, 1) ** 2
@@ -80,6 +84,8 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
         if self.__double:
             psf = psf.float()
         psf = fft.fftshift(psf, (-1, -2))
+
+        self.__edge_check(psf)
         return utils.pad_or_crop(psf, self._image_size)
 
     def heightmap(self, use_cache=False) -> torch.Tensor:
@@ -90,21 +96,31 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
     def specific_log(self, *args, **kwargs):
         log = super().specific_log(*args, **kwargs)
         h = self.heightmap(use_cache=True)
-        h = self.apply_stop(self.buf_r_sqr, h)
+        h = self.apply_stop(h, r2=self.buf_r_sqr, x=self.u_axis, y=self.v_axis)
         log['optics/heightmap_max'] = h.max()
         log['optics/heightmap_min'] = h.min()
         return log
 
     @property
     def u_axis(self):
-        return self.__u_axis
+        return self.buf_u_axis
 
     @property
     def v_axis(self):
-        return self.__v_axis
+        return self.buf_v_axis
 
     @property
     def interval(self):
+        """
+        Sampling interval on aperture plane. It is given as:
+        .. math::
+            \delta_a= \\frac{\lambda s}{N\Delta_0}
+        and multiplied by PSF cropping factor, where :math:`s` is the distance
+        between lens and sensor, :math:`N` is sampling number and :math:`\Delta_0`
+        is sensor pixel size. It is ensured in this way that the sampling interval
+        of PSF equals to :math:`\Delta_0`.
+        :return: Sampling interval in shape :math:`N_\lambda\times 2`
+        """
         sample_range = self.buf_wavelengths[:, None] * self.sensor_distance / self.camera_pitch
         return sample_range * self.__psf_factor / torch.tensor([self._image_size], device=self.device)
 
@@ -117,7 +133,21 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
         })
         return base
 
+    @torch.no_grad()
     def __uv_grid(self, dim):
         n = self._image_size[dim] * self.__scale_factor // self.__psf_factor
         x = torch.linspace(-n / 2, n / 2, n).reshape((1, -1)) * self.interval[:, [dim]]  # n_wl x N
         return x[:, None, :] if dim == 1 else x[:, :, None]
+
+    @torch.no_grad()
+    def __edge_check(self, psf, limit=0.05):
+        """Ensuring that the edge values of PSF are small enough to be ignored."""
+        index = torch.zeros_like(psf, dtype=torch.bool)
+        index[..., [0, -1], :] = True
+        index[..., [0, -1]] = True
+        ratio = torch.max(psf[index]).item() / torch.max(psf).item()
+        if ratio > limit:
+            raise RuntimeError(
+                f'The edge values of PSF are not small enough to be ignored(ratio: {ratio:.3g}).' +
+                ' Try to reduce PSF effective factor.'
+            )

@@ -23,6 +23,7 @@ def refractive_index(wavelength, a=1.5375, b=0.00829045, c=-0.000211046):
     return a + b / (wavelength * 1e6) ** 2 + c / (wavelength * 1e6) ** 4
 
 
+@torch.no_grad()
 def _depthmap2layers(depthmap, n_depths, binary=False):
     depthmap = depthmap[:, None, ...]  # add color dim
 
@@ -45,7 +46,7 @@ def _depthmap2layers(depthmap, n_depths, binary=False):
 
 class Camera(nn.Module, metaclass=abc.ABCMeta):
     def __init__(
-        self,
+        self, *,
         focal_depth: float,
         min_depth: float,
         max_depth: float,
@@ -56,11 +57,18 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
         camera_pitch: float,
         wavelengths=(632e-9, 550e-9, 450e-9),
         diffraction_efficiency=0.7,
-        loss_items: typing.Tuple[str] = ()
+        loss_items: typing.Tuple[str] = (),
+        aperture_type='circular',
     ):
         super().__init__()
+        self.__applying_stop = {
+            'circular': self.apply_circular_stop,
+            'square': self.apply_square_stop
+        }
         if min_depth < 1e-6:
             raise ValueError(f'Provided min depth({min_depth}) is too small')
+        if aperture_type not in self.__applying_stop:
+            raise ValueError(f'Unknown aperture type: {aperture_type}')
 
         scene_distances = utils.ips_to_metric(
             torch.linspace(0, 1, steps=n_depths), min_depth, max_depth
@@ -76,6 +84,7 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
         self.__focal_length = focal_length
         self._image_size = self.regularize_image_size(image_size)
         self.__loss_items = loss_items
+        self.__aperture_type = aperture_type
 
         self.__register_wavlength(wavelengths)
         self.register_buffer('buf_scene_distances', scene_distances)
@@ -129,7 +138,8 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
             'diffraction_efficiency': hparams.diffraction_efficiency,
             'requires_grad': hparams.optimize_optics,
             'loss_items': hparams.loss_items or (),
-            'init_type': hparams.initialization_type
+            'init_type': hparams.initialization_type,
+            'aperture_type': hparams.aperture_type
         }
 
     def extra_repr(self):
@@ -137,7 +147,7 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
 Camera module...
 Refcative index for center wavelength: {refractive_index(self.buf_wavelengths[self.n_wavelengths // 2])}
 f number: {self.f_number:.3f}
-Depths: {self.buf_scene_distances}
+Depths: {list(self.buf_scene_distances)}
 Input image size: {self._image_size}
               '''
 
@@ -148,8 +158,9 @@ Input image size: {self._image_size}
         return captimg, volume, psf
 
     def get_capt_img(self, img, depthmap, psf, occlusion):
-        layered_mask = _depthmap2layers(depthmap, self._n_depths, binary=True)
-        volume = layered_mask * img[:, :, None, ...]
+        with torch.no_grad():
+            layered_mask = _depthmap2layers(depthmap, self._n_depths, binary=True)
+            volume = layered_mask * img[:, :, None, ...]
         return algorithm.image.image_formation(volume, layered_mask, psf, occlusion)
 
     def psf_at_camera(
@@ -190,8 +201,23 @@ Input image size: {self._image_size}
         self.__psf_cache = utils.pad_or_crop(self.__psf_cache, size)
         return self.__psf_cache
 
-    def apply_stop(self, r2, x):
-        return torch.where(r2 < self.aperture_diameter ** 2 / 4, x, torch.zeros_like(x))
+    def apply_stop(self, *args, **kwargs):
+        return self.__applying_stop[self.aperture_type](*args, **kwargs)
+
+    def apply_circular_stop(self, f, limit=None, **kwargs):
+        r2 = kwargs['r2']
+        if limit is None:
+            limit = self.aperture_diameter / 2
+        return torch.where(r2 < limit ** 2, f, torch.zeros_like(f))
+
+    def apply_square_stop(self, f, limit=None, **kwargs):
+        x, y = kwargs['x'], kwargs['y']
+        if limit is None:
+            limit = self.aperture_diameter / 2
+        return torch.where(
+            torch.logical_and(torch.abs(x) < limit, torch.abs(y) < limit),
+            f, torch.zeros_like(f)
+        )
 
     def mtf_loss(self, bounded=True, normalized=True):
         mtf = self.mtf
@@ -298,6 +324,10 @@ Input image size: {self._image_size}
     @property
     def loss_items(self):
         return self.__loss_items
+
+    @property
+    def aperture_type(self):
+        return self.__aperture_type
 
     def _scale_coordinate(self, x):
         x = x / self.aperture_diameter + 0.5

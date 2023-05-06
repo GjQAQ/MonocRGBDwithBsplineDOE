@@ -29,7 +29,8 @@ def kernel_spectrum(
     y_frequency: Iterable[float] = None,
     grid_size: Tuple[int, int] = (512, 512),
     show_size: Tuple[int, int] = None,
-    show_xi: bool = False
+    show_xi: bool = False,
+    scale=False
 ):
     if x_frequency is None:
         x_frequency = torch.linspace(-1, 1, 5) * (max_frequency[0] / 2)
@@ -62,7 +63,8 @@ def kernel_spectrum(
     if c1 != 0 and c2 != 0:
         res = res[..., c1:-c1, c2:-c2]
     res = torch.sqrt(res)
-    res /= torch.max(res)
+    if scale:
+        res /= torch.max(res)
 
     if show_xi:
         return res, old_complex.abs(xi),

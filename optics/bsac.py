@@ -62,12 +62,12 @@ class BSplineApertureCamera(optics.ClassicCamera):
             init = self.lattice_focal_init()
         elif init_type.startswith('existent'):
             ckpt = torch.load(init_type[9:], map_location=lambda storage, loc: storage)
+            self.__control_points = torch.zeros(grid_size)
             self.load_state_dict(ckpt['state_dict'])
-            init = None
+            init = self.__control_points
         else:
             init = torch.zeros(grid_size)
-        if init is not None:
-            self.__control_points = torch.nn.Parameter(init, requires_grad=requires_grad)
+        self.__control_points = torch.nn.Parameter(init, requires_grad=requires_grad)
 
         # buffered tensors used to compute heightmap in psf
         self.register_buffer('buf_u_matrix', self.__design_matrix(1))
@@ -83,31 +83,44 @@ class BSplineApertureCamera(optics.ClassicCamera):
             self.__control_points.unsqueeze(0)
         )  # n_wl x N_u x N_v
 
+    @torch.no_grad()
     def lattice_focal_init(self):
         slope_range, n, wl = self.prepare_lattice_focal_init()
         r = self.aperture_diameter / 2
         u = torch.linspace(-r, r, self.__grid_size[0])[None, ...]
         v = torch.linspace(-r, r, self.__grid_size[1])[..., None]
-        return algorithm.lattice_focal_heightmap(
-            *algorithm.lattice_focal_slopemap(u, v, n, slope_range, self.aperture_diameter),
-            n, self.focal_length, self.focal_depth, wl
+        # return algorithm.slope2height(
+        #     u, v,
+        #     *algorithm.slopemap(u, v, n, slope_range, self.aperture_diameter),
+        #     n * n, self.focal_length, self.focal_depth, wl
+        # )
+        return algorithm.slope2height(
+            u, v,
+            *algorithm.slopemap(u, v, n, slope_range, self.aperture_diameter, fill='inscribe'),
+            12, self.focal_length, self.focal_depth, wl
         )
 
+    @torch.no_grad()
     def aberration(self, u, v, wavelength: float = None):
         if wavelength is None:
             wavelength = self.buf_wavelengths[len(self.buf_wavelengths) / 2]
         c = self.__control_points.cpu()[None, None, ...]
 
         r2 = u ** 2 + v ** 2
-        u = self._scale_coordinate(u).squeeze(-2)  # 1 x omega_x x t1
-        v = self._scale_coordinate(v).squeeze(-1)  # omega_y x 1 x t2
-        u_mat = self.__design_matrices(u, c.shape[-2], self.__knot_vectors[0], self.__degrees[0])
-        v_mat = self.__design_matrices(v, c.shape[-1], self.__knot_vectors[1], self.__degrees[1])
+        scaled_u = self._scale_coordinate(u).squeeze(-2)  # 1 x omega_x x t1
+        scaled_v = self._scale_coordinate(v).squeeze(-1)  # omega_y x 1 x t2
+        u_mat = self.__design_matrices(scaled_u, c.shape[-2], self.__knot_vectors[0], self.__degrees[0])
+        v_mat = self.__design_matrices(scaled_v, c.shape[-1], self.__knot_vectors[1], self.__degrees[1])
         h = self.__heightmap(u_mat, v_mat, c)
 
         phase = optics.heightmap2phase(h, wavelength, optics.refractive_index(wavelength))
         phase = torch.transpose(phase, 0, 1)
-        return self.apply_stop(torch.stack([r2, r2], -1), fft.exp2xy(1, phase))
+        return self.apply_circular_stop(
+            fft.exp2xy(1, phase),
+            r2=torch.stack([r2, r2], -1),
+            x=torch.stack([u, u], -1),
+            y=torch.stack([v, v], -1)
+        )
 
     @torch.no_grad()
     def heightmap_log(self, size):
@@ -119,10 +132,9 @@ class BSplineApertureCamera(optics.ClassicCamera):
 
         u, v = torch.meshgrid(*axis)
         h = self.__heightmap(*m, self.__control_points.cpu())
-        h = torch.where(
-            (u - 0.5) ** 2 + (v - 0.5) ** 2 < 0.25,
-            h, torch.zeros_like(h)
-        ).unsqueeze(0)
+        u = u - 0.5
+        v = v - 0.5
+        h = self.apply_stop(h, 0.5, x=u, y=v, r2=u ** 2 + v ** 2).unsqueeze(0)
         h -= h.min()
         h /= h.max()
         return h
@@ -146,6 +158,7 @@ class BSplineApertureCamera(optics.ClassicCamera):
         })
         return base
 
+    @torch.no_grad()
     def __design_matrix(self, dim):
         n, kv, p = self._image_size[dim], self.__knot_vectors[dim], self.__degrees[dim]
         x = torch.flatten(self.u_axis if dim == 1 else self.v_axis, -2, -1)
