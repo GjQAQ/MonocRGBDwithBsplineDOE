@@ -67,6 +67,10 @@
     "type": "float",
     "default": 1
   },
+  "reconstructor_type": {
+    "type": "str",
+    "default": "plain"
+  },
 
   "reg_tikhonov": {
     "type": "float",

@@ -10,4 +10,5 @@ def compatible_load(ckpt_path: str):
     hparams.setdefault('initialization_type', 'default')
     hparams.setdefault('norm', 'BN')
     hparams.setdefault('aperture_type', 'circular')
+    hparams.setdefault('reconstructor_type', 'plain')
     return ckpt, hparams

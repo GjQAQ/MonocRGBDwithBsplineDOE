@@ -15,7 +15,7 @@ import torchvision.utils
 import debayer
 from torch import Tensor
 
-from reconstruction.reconstructor import Reconstructor
+import reconstruction as reco
 from .vgg16loss import Vgg16PerceptualLoss
 import dataset
 import utils
@@ -27,6 +27,10 @@ optics_models = {
     'rotationally-symmetric': optics.RotationallySymmetricCamera,
     'b-spline': optics.BSplineApertureCamera,
     'zernike': optics.ZernikeApertureCamera
+}
+reconstructors={
+    'plain':reco.Reconstructor,
+    'depth-first':reco.DepthGuidedReconstructor
 }
 FinalOutput = collections.namedtuple(
     'FinalOutput',
@@ -72,7 +76,7 @@ class SnapshotDepth(pl.LightningModule):
         ]
 
         self.log_dir = log_dir
-        self.decoder = Reconstructor(
+        self.decoder = reconstructors[self.hparams.reconstructor_type](
             self.hparams.dynamic_conv,
             self.hparams.preinverse,
             self.hparams.n_depths,
