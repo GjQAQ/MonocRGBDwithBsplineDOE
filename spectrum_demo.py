@@ -1,6 +1,5 @@
 import functools
 import argparse
-import os.path
 
 import matplotlib.pyplot as plt
 
@@ -19,23 +18,6 @@ def focus_shift(original_aber, s, d, wavelength):
         return fft.exp2xy(1, phase)
 
     return lambda u, v: old_c.multiply(original_aber(u, v), __focus_shift(u, v))
-
-
-def show_spectrum(spectrum, info=True, save=False, **kwargs):
-    xc, yc = spectrum.shape[1], spectrum.shape[0]
-    for y in range(yc):
-        for x in range(xc):
-            slise = spectrum[y][x]
-            plt.subplot(yc, xc, y * xc + x + 1)
-            plt.axis('off')
-            plt.imshow(slise, cmap='gray')
-    if info:
-        plt.suptitle(f'Max: {spectrum.max(): .3g}', x=0.9, y=0.1, ha='right')
-
-    if save:
-        plt.savefig(os.path.join(kwargs['path'], kwargs['id'] + '.png'))
-    else:
-        plt.show()
 
 
 def load_trained_lens(ckpt_path) -> optics.Camera:
@@ -167,6 +149,6 @@ if __name__ == '__main__':
 
     spectrum = spectrum ** args.scale_exponent
     if args.save_path is None:
-        show_spectrum(spectrum.detach())
+        utils.show_spectrum(spectrum.detach())
     else:
-        show_spectrum(spectrum.detach(), save=True, path=args.save_path, id=args.id)
+        utils.show_spectrum(spectrum.detach(), save=True, path=args.save_path, id=args.id)

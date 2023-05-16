@@ -5,6 +5,8 @@ from torch import nn as nn
 
 from reconstruction.odconv import ODConv2d
 
+__all__ = ['UNet']
+
 
 class ConvolutionBlock(nn.Module):
     def __init__(self, ch_in: int, ch_out: int, norm: nn.Module, conv=nn.Conv2d, momentum=0.01):

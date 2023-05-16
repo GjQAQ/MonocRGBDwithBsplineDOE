@@ -89,11 +89,6 @@ class BSplineApertureCamera(optics.ClassicCamera):
         r = self.aperture_diameter / 2
         u = torch.linspace(-r, r, self.__grid_size[0])[None, ...]
         v = torch.linspace(-r, r, self.__grid_size[1])[..., None]
-        # return algorithm.slope2height(
-        #     u, v,
-        #     *algorithm.slopemap(u, v, n, slope_range, self.aperture_diameter),
-        #     n * n, self.focal_length, self.focal_depth, wl
-        # )
         return algorithm.slope2height(
             u, v,
             *algorithm.slopemap(u, v, n, slope_range, self.aperture_diameter, fill='inscribe'),

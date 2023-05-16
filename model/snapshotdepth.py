@@ -28,18 +28,13 @@ optics_models = {
     'b-spline': optics.BSplineApertureCamera,
     'zernike': optics.ZernikeApertureCamera
 }
-reconstructors={
-    'plain':reco.Reconstructor,
-    'depth-first':reco.DepthGuidedReconstructor
+reconstructors = {
+    'plain': reco.Reconstructor,
+    'depth-first': reco.DepthGuidedReconstructor
 }
 FinalOutput = collections.namedtuple(
     'FinalOutput',
-    [
-        'capt_img', 'capt_linear',
-        'est_img', 'est_depthmap',
-        'target_img', 'target_depthmap',
-        'psf'
-    ]
+    ['capt_img', 'capt_linear', 'est_img', 'est_depthmap', 'target_img', 'target_depthmap', 'psf']
 )
 
 

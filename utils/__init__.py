@@ -4,6 +4,8 @@ import torch.nn.functional
 import matplotlib.pyplot as plt
 
 from .load import *
+from .log import *
+from .vis import *
 
 
 def init_module(module: nn.Module):
