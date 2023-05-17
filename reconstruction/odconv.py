@@ -13,8 +13,9 @@ import torch.autograd
 class Attention(nn.Module):
     def __init__(
         self,
-        in_planes,
-        out_planes,
+        hint_channels,
+        in_channels,
+        out_channels,
         kernel_size,
         groups=1,
         reduction=0.0625,
@@ -23,23 +24,23 @@ class Attention(nn.Module):
         activation=nn.ReLU
     ):
         super(Attention, self).__init__()
-        attention_channel = max(int(in_planes * reduction), min_channel)
+        attention_channel = max(int(hint_channels * reduction), min_channel)
         self.kernel_size = kernel_size
         self.kernel_num = kernel_num
         self.temperature = 1.0
 
         self.avgpool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Conv2d(in_planes, attention_channel, 1, bias=False)
+        self.fc = nn.Conv2d(hint_channels, attention_channel, 1, bias=False)
         self.bn = nn.BatchNorm2d(attention_channel)
         self.relu = activation(inplace=True)
 
-        self.channel_fc = nn.Conv2d(attention_channel, in_planes, 1, bias=True)
+        self.channel_fc = nn.Conv2d(attention_channel, in_channels, 1, bias=True)
         self.func_channel = self.get_channel_attention
 
-        if in_planes == groups and in_planes == out_planes:  # depth-wise convolution
+        if hint_channels == groups and hint_channels == out_channels:  # depth-wise convolution
             self.func_filter = self.skip
         else:
-            self.filter_fc = nn.Conv2d(attention_channel, out_planes, 1, bias=True)
+            self.filter_fc = nn.Conv2d(attention_channel, out_channels, 1, bias=True)
             self.func_filter = self.get_filter_attention
 
         if kernel_size == 1:  # point-wise convolution
@@ -90,8 +91,8 @@ class Attention(nn.Module):
 class ODConv2d(nn.Conv2d):
     def __init__(
         self,
-        in_planes,
-        out_planes,
+        in_channels,
+        out_channels,
         kernel_size,
         stride=1,
         padding=0,
@@ -100,15 +101,18 @@ class ODConv2d(nn.Conv2d):
         reduction=0.0625,
         kernel_num=4,
         bias=False,
-        attention_activation=None
+        attention_activation=None,
+        hint_channels=None
     ):
-        super(ODConv2d, self).__init__(in_planes, out_planes, kernel_size)
+        super(ODConv2d, self).__init__(in_channels, out_channels, kernel_size)
 
         if bias:
             raise NotImplementedError()
+        if hint_channels is None:
+            hint_channels = in_channels
 
-        self.in_planes = in_planes
-        self.out_planes = out_planes
+        self.in_planes = in_channels
+        self.out_planes = out_channels
         self.kernel_size = kernel_size
         self.stride = stride
         self.padding = padding
@@ -117,13 +121,14 @@ class ODConv2d(nn.Conv2d):
         self.kernel_num = kernel_num
 
         self.weight = nn.Parameter(
-            torch.randn(kernel_num, out_planes, in_planes // groups, kernel_size, kernel_size), requires_grad=True
+            torch.randn(kernel_num, out_channels, in_channels // groups, kernel_size, kernel_size), requires_grad=True
         )
         self._initialize_weights()
 
         actv = {'activation': attention_activation} if attention_activation else {}
         self.attention = Attention(
-            in_planes, out_planes, kernel_size, groups=groups, reduction=reduction, kernel_num=kernel_num, **actv
+            hint_channels, in_channels, out_channels, kernel_size,
+            groups=groups, reduction=reduction, kernel_num=kernel_num, **actv
         )
 
         if self.kernel_size == 1 and self.kernel_num == 1:
@@ -138,10 +143,13 @@ class ODConv2d(nn.Conv2d):
     def update_temperature(self, temperature):
         self.attention.update_temperature(temperature)
 
-    def _forward_impl_common(self, x):
+    def _forward_impl_common(self, x, hint=None):
         # Multiplying channel attention (or filter attention) to weights and feature maps are equivalent,
         # while we observe that when using the latter method the models will run faster with less gpu memory cost.
-        channel_attention, filter_attention, spatial_attention, kernel_attention = self.attention(x)
+        if hint is None:
+            hint = x
+
+        channel_attention, filter_attention, spatial_attention, kernel_attention = self.attention(hint)
         batch_size, in_planes, height, width = x.size()
         x = x * channel_attention
         x = x.reshape(1, -1, height, width)
@@ -157,8 +165,11 @@ class ODConv2d(nn.Conv2d):
         output = output * filter_attention
         return output
 
-    def _forward_impl_pw1x(self, x):
-        channel_attention, filter_attention, spatial_attention, kernel_attention = self.attention(x)
+    def _forward_impl_pw1x(self, x, hint):
+        if hint is None:
+            hint = x
+
+        channel_attention, filter_attention, spatial_attention, kernel_attention = self.attention(hint)
         x = x * channel_attention
         output = functional.conv2d(
             x,
@@ -168,5 +179,5 @@ class ODConv2d(nn.Conv2d):
         output = output * filter_attention
         return output
 
-    def forward(self, x):
-        return self._forward_impl(x)
+    def forward(self, x, hint=None):
+        return self._forward_impl(x, hint)

@@ -9,68 +9,55 @@ from .base import *
 class DepthGuidedReconstructor(nn.Module):
     def __init__(
         self,
-        dynamic_conv: bool,
-        preinverse: bool = True,
         n_depth: int = 16,
-        ch_base: int = 32,
         norm_layer=None
     ):
-        if dynamic_conv:
-            raise ValueError(f'Depth guided reconstructor does not support dynamic convolution')
         super().__init__()
-        self.__preinverse = preinverse
         self.__depth_only = False
         self.__depth_training = True
         self.__img_training = True
-        ch_pin = CH_RGB * (n_depth + 1)
 
-        self.__input_layer = nn.Sequential(
-            nn.Conv2d(ch_pin, ch_pin, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(ch_pin),
-            nn.ReLU(),
-            nn.Conv2d(ch_pin, ch_base, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(ch_base),
-            nn.ReLU()
+        kwargs = {'kernel_size': 3, 'padding': 1, 'bias': False}
+        self.vol_hint = nn.ModuleList([
+            GuidedConv(CH_RGB, 8, n_depth * CH_RGB, **kwargs),
+            GuidedConv(8, 16, n_depth * CH_RGB, **kwargs),
+            GuidedConv(16, 32, n_depth * CH_RGB, **kwargs)
+        ])
+        self.depth_estimator = nn.Sequential(
+            UNet([32, 32, 64, 64], norm_layer),
+            nn.Conv2d(32, CH_DEPTH, kernel_size=1, bias=True)
         )
-        if not preinverse:
-            self.__input_layer = nn.Sequential(
-                nn.Conv2d(CH_RGB, ch_pin, kernel_size=1, bias=False),
-                nn.BatchNorm2d(ch_pin),
-                nn.ReLU(),
-                self.__input_layer
-            )
-
-        self.__depth_estimator = nn.Sequential(
-            UNet([ch_base, ch_base, 2 * ch_base, 2 * ch_base, 4 * ch_base], norm_layer, dynamic_conv),
-            nn.Conv2d(ch_base, CH_DEPTH, kernel_size=1, bias=True)
-        )
-        self.__rgb_estimator = nn.Sequential(
-            UNet([ch_base + 1, ch_base, 2 * ch_base, 2 * ch_base, 4 * ch_base], norm_layer, dynamic_conv),
-            nn.Conv2d(ch_base, CH_RGB, kernel_size=1, bias=True)
+        self.depth_hint = nn.ModuleList([
+            GuidedConv(CH_RGB, 8, 1, **kwargs),
+            GuidedConv(8, 16, 1, **kwargs),
+            GuidedConv(16, 32, 1, **kwargs)
+        ])
+        self.rgb_estimator = nn.Sequential(
+            UNet([32, 32, 64, 64], norm_layer),
+            nn.Conv2d(32, CH_RGB, kernel_size=1, bias=True)
         )
 
         utils.init_module(self)
         # todo
-        self.depth_only = False
-        self.depth_estimator_training = False
-        self.img_estimator_training = True
+        self.depth_only = True
+        self.depth_estimator_training = True
+        self.img_estimator_training = False
 
     def forward(self, capt_img, pin_volume) -> ReconstructionOutput:
-        b, _, _, h, w = pin_volume.shape
-        if self.__preinverse:
-            inputs = torch.cat([capt_img.unsqueeze(2), pin_volume], 2)
-        else:
-            inputs = capt_img.unsqueeze(2)
+        b, c, d, h, w = pin_volume.shape
+        pin_volume = torch.reshape(pin_volume, (b, c * d, h, w))
+        x = capt_img
 
-        inputs = inputs.reshape(b, -1, h, w)
-        pre_feature = self.__input_layer(inputs)
-        est_depth = torch.sigmoid(self.__depth_estimator(pre_feature))
+        for att_layer in self.vol_hint:
+            x = att_layer(x, pin_volume)
+        est_depth = torch.sigmoid(self.depth_estimator(x))
+
         if self.depth_only:
-            est_img = capt_img
-        else:
-            enhanced_feature = torch.cat((pre_feature, est_depth), 1)
-            est_img = self.__rgb_estimator(enhanced_feature)
-            est_img = torch.sigmoid(est_img)
+            return ReconstructionOutput(capt_img, est_depth)
+
+        for att_layer in self.depth_hint:
+            x = att_layer(x, est_depth)
+        est_img = torch.sigmoid(self.rgb_estimator(x))
         return ReconstructionOutput(est_img, est_depth)
 
     @property
@@ -87,7 +74,8 @@ class DepthGuidedReconstructor(nn.Module):
 
     @depth_estimator_training.setter
     def depth_estimator_training(self, value: bool):
-        self.__set_training(value, self.__depth_training, self.__depth_estimator)
+        self.__set_training(value, self.__depth_training, self.vol_hint)
+        self.__set_training(value, self.__depth_training, self.depth_estimator)
         self.__depth_training = value
 
     @property
@@ -96,7 +84,8 @@ class DepthGuidedReconstructor(nn.Module):
 
     @img_estimator_training.setter
     def img_estimator_training(self, value):
-        self.__set_training(value, self.__img_training, self.__rgb_estimator)
+        self.__set_training(value, self.__img_training, self.depth_hint)
+        self.__set_training(value, self.__img_training, self.rgb_estimator)
         self.__img_training = value
 
     @staticmethod

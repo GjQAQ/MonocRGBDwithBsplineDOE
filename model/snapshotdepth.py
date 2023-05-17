@@ -30,7 +30,8 @@ optics_models = {
 }
 reconstructors = {
     'plain': reco.Reconstructor,
-    'depth-first': reco.DepthGuidedReconstructor
+    'depth-first': reco.DepthGuidedReconstructor,
+    'vol-guided': reco.VolumeGuided,
 }
 FinalOutput = collections.namedtuple(
     'FinalOutput',
@@ -72,10 +73,7 @@ class SnapshotDepth(pl.LightningModule):
 
         self.log_dir = log_dir
         self.decoder = reconstructors[self.hparams.reconstructor_type](
-            self.hparams.dynamic_conv,
-            self.hparams.preinverse,
             self.hparams.n_depths,
-            self.hparams.model_base_ch,
             self.norm_dict[self.hparams.norm.upper()]
         )
         self.debayer = debayer.Debayer3x3()
@@ -114,6 +112,9 @@ class SnapshotDepth(pl.LightningModule):
             lr_scale = float(self.trainer.global_step + 1) / 4000.
             optimizer.param_groups[0]['lr'] = lr_scale * self.hparams.optics_lr
             optimizer.param_groups[1]['lr'] = lr_scale * self.hparams.cnn_lr
+
+        if epoch >= 20 and epoch % 5 == 0:
+            optimizer.param_groups[1]['lr'] *= 0.8
 
         optimizer.step()
         optimizer.zero_grad()
@@ -220,16 +221,12 @@ class SnapshotDepth(pl.LightningModule):
 
         # Crop the boundary artifact of DFT-based convolution
         captimgs = utils.crop_boundary(captimgs, self.crop_width)
-        target_volumes = utils.crop_boundary(target_volumes, self.crop_width)
         psf = utils.crop_boundary(psf, self.crop_width)
 
-        if self.hparams.preinverse:
-            # Apply the Tikhonov-regularized inverse
-            pinv_volumes = inverse.tikhonov_inverse(
-                captimgs, psf, self.hparams.reg_tikhonov, True
-            )
-        else:
-            pinv_volumes = torch.zeros_like(target_volumes)
+        # Apply the Tikhonov-regularized inverse
+        pinv_volumes = inverse.tikhonov_inverse(
+            captimgs, psf, self.hparams.reg_tikhonov, True
+        )
 
         # Feed the cropped images to CNN
         model_outputs = self.decoder(captimgs, pinv_volumes)

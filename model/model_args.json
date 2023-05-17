@@ -76,10 +76,6 @@
     "type": "float",
     "default": 1
   },
-  "model_base_ch": {
-    "type": "int",
-    "default": 32
-  },
 
   "psf_size": {
     "type": "int",
@@ -176,13 +172,11 @@
   },
 
   "#flag": {
-    "preinverse": true,
     "bayer": true,
     "occlusion": true,
     "optimize_optics": false,
     "log_misc": false,
     "double_precision": false,
-    "dynamic_conv": true,
     "psfjitter": {
       "dest": "psf_jitter",
       "default": true

@@ -5,14 +5,11 @@ import torch.nn as nn
 
 from .unet import UNet
 from .dnet import DNet
+from .base import *
 import utils
 
-CH_DEPTH = 1
-CH_RGB = 3
-ReconstructionOutput = collections.namedtuple('ReconstructionOutput', ['est_img', 'est_depthmap'])
 
-
-class Reconstructor(nn.Module):
+class VolumeGuided(nn.Module):
     """
     A reconstructor for image received by sensor directly.
     Composed of three module: an input layer, Res-UNet and an output layer.
@@ -23,27 +20,24 @@ class Reconstructor(nn.Module):
         1. Reconstructed image (B x 3 x H x W)
         2. Estimated depthmap (B x 1 x H x W)
     """
+
     def __init__(
         self,
         n_depth: int = 16,
         norm_layer=None
     ):
         super().__init__()
-        ch_pin = CH_RGB * (n_depth + 1)
 
-        input_layer = nn.Sequential(
-            nn.Conv2d(ch_pin, ch_pin, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(ch_pin),
-            nn.ReLU(),
-            nn.Conv2d(ch_pin, 32, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(32),
-            nn.ReLU()
-        )
+        kwargs = {'kernel_size': 3, 'padding': 1, 'bias': False}
+        self.att_layers = nn.ModuleList([
+            GuidedConv(CH_RGB, 8, n_depth * CH_RGB, **kwargs),
+            GuidedConv(8, 16, n_depth * CH_RGB, **kwargs),
+            GuidedConv(16, 32, n_depth * CH_RGB, **kwargs)
+        ])
 
         output_blocks = [nn.Conv2d(32, CH_RGB + CH_DEPTH, kernel_size=1, bias=True)]
         output_layer = nn.Sequential(*output_blocks)
-        self.__decoder = nn.Sequential(
-            input_layer,
+        self.net = nn.Sequential(
             UNet([32, 32, 64, 64, 128], norm_layer),
             # DNet((64, 128, 256, 512)),
             output_layer,
@@ -52,7 +46,12 @@ class Reconstructor(nn.Module):
         utils.init_module(self)
 
     def forward(self, capt_img, pin_volume) -> ReconstructionOutput:
-        b, _, _, h, w = pin_volume.shape
-        inputs = torch.cat([capt_img.unsqueeze(2), pin_volume], 2)
-        est = torch.sigmoid(self.__decoder(inputs.reshape(b, -1, h, w)))
+        b, c, d, h, w = pin_volume.shape
+        pin_volume = torch.reshape(pin_volume, (b, c * d, h, w))
+        x = capt_img
+
+        for att_layer in self.att_layers:
+            x = att_layer(x, pin_volume)
+
+        est = torch.sigmoid(self.net(x))
         return ReconstructionOutput(est[:, :-1], est[:, [-1]])
