@@ -2,6 +2,10 @@ import os
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
+import torchvision.io as tvio
+
+import algorithm
 
 
 def __spectrum_format_tick(ticks: np.ndarray):
@@ -15,6 +19,28 @@ def __spectrum_format_tick(ticks: np.ndarray):
     if len(ticks) % 2 == 1:
         ticks[len(ticks) // 2] = '0'
     return ticks
+
+
+def split_featmaps(x):
+    s = x.shape
+    x = torch.reshape(x, (-1, s[-2], s[-1]))
+    return list(x)
+
+
+def save_featmaps(path, prefix, img):
+    if isinstance(img, (list, tuple)):
+        for i in range(len(img)):
+            save_featmaps(path, prefix + f'_{i}', img[i])
+
+    tvio.write_png(img, os.path.join(path, prefix + '.png'))
+
+
+def __plot_featmaps(prefix, img):
+    if isinstance(img, (list, tuple)):
+        for i in range(len(img)):
+            __plot_featmaps(prefix + f'_{i}', img[i])
+
+    pass  # todo
 
 
 def show_spectrum(spectrum, info=True, save=False, **kwargs):

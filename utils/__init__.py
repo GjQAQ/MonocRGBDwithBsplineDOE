@@ -19,6 +19,17 @@ def init_module(module: nn.Module):
             nn.init.constant_(m.bias, 0)
 
 
+def change_training(model, new):
+    for param in model.parameters():
+        param.requires_grad = new
+
+
+def freeze_norm(model):
+    for m in model.modules():
+        if isinstance(m, nn.BatchNorm2d):
+            m.momentum = 0
+
+
 def crop_boundary(x, w):
     if w == 0:
         return x

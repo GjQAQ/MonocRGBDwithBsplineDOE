@@ -145,9 +145,9 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
     def extra_repr(self):
         return f'''
 Camera module...
-Refcative index for center wavelength: {refractive_index(self.buf_wavelengths[self.n_wavelengths // 2])}
+Refcative index for center wavelength: {refractive_index(self.buf_wavelengths[self.n_wavelengths // 2]):.3f}
 f number: {self.f_number:.3f}
-Depths: {list(self.buf_scene_distances)}
+Depths: {list(map(lambda x: f'{x:.3f}', self.buf_scene_distances.numpy().tolist()))}
 Input image size: {self._image_size}
               '''
 

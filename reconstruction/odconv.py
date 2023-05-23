@@ -1,5 +1,8 @@
 """
-todo
+This implementation differs from that of https://github.com/OSVAI/ODConv in such ways:
+1. Enable selecting various activation function in Attention;
+2. Enable using different attention source in ODConv besides its input;
+3. Remove Attention._initialize_weights.
 """
 # remove: Attention._initialize_weights
 # make activation in Attention selectable

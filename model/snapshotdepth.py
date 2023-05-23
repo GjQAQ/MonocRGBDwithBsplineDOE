@@ -1,9 +1,7 @@
-import re
 import typing
 import collections
 import argparse
 import json
-from typing import Union, Dict
 
 import pytorch_lightning as pl
 import pytorch_lightning.metrics.regression as regression
@@ -13,7 +11,6 @@ import torch.optim as optim
 import torchvision.transforms
 import torchvision.utils
 import debayer
-from torch import Tensor
 
 import reconstruction as reco
 from .vgg16loss import Vgg16PerceptualLoss
@@ -30,8 +27,13 @@ optics_models = {
 }
 reconstructors = {
     'plain': reco.Reconstructor,
-    'depth-first': reco.DepthGuidedReconstructor,
+    'depth-guided': reco.DepthGuidedReconstructor,
     'vol-guided': reco.VolumeGuided,
+}
+norm_dict = {
+    'BN': torch.nn.BatchNorm2d,
+    'LN': torch.nn.LayerNorm,
+    'IN': torch.nn.InstanceNorm2d
 }
 FinalOutput = collections.namedtuple(
     'FinalOutput',
@@ -44,16 +46,12 @@ def _gray_to_rgb(x):
 
 
 class SnapshotDepth(pl.LightningModule):
-    norm_dict = {
-        'BN': torch.nn.BatchNorm2d,
-        'LN': torch.nn.LayerNorm,
-        'IN': torch.nn.InstanceNorm2d
-    }
 
     def __init__(self, hparams, log_dir=None, print_info=True):
         super().__init__()
         self.hparams = hparams
         self.save_hyperparameters(self.hparams)
+        hparams = self.hparams
 
         self.__metrics = {
             'depth_loss': regression.MeanAbsoluteError(),
@@ -65,28 +63,42 @@ class SnapshotDepth(pl.LightningModule):
             'vgg_image': regression.MeanSquaredError(),
         }
         self.__loss_weights = [
-            self.hparams.depth_loss_weight,
-            self.hparams.image_loss_weight,
-            self.hparams.psf_expansion_loss_weight,
-            self.hparams.mtf_loss_weight
+            hparams.depth_loss_weight,
+            hparams.image_loss_weight,
+            hparams.psf_expansion_loss_weight,
+            hparams.mtf_loss_weight
         ]
 
         self.log_dir = log_dir
-        self.decoder = reconstructors[self.hparams.reconstructor_type](
-            self.hparams.n_depths,
-            self.norm_dict[self.hparams.norm.upper()]
+        self.decoder = reconstructors[hparams.reconstructor_type](
+            hparams.n_depths,
+            norm_dict[hparams.norm.upper()],
+            **{'depth_refine': hparams.depth_refine} if hparams.reconstructor_type == 'plain' else {}
         )
         self.debayer = debayer.Debayer3x3()
 
         self.image_lossfn = Vgg16PerceptualLoss()
         self.depth_lossfn = torch.nn.L1Loss()
 
-        self.crop_width = self.hparams.crop_width
-        if self.hparams.camera_type in optics_models:
-            camera_class = optics_models[self.hparams.camera_type]
-            self.camera = camera_class(**camera_class.extract_parameters(self.hparams))
+        self.crop_width = hparams.crop_width
+        if hparams.camera_type in optics_models:
+            camera_class = optics_models[hparams.camera_type]
+            self.camera = camera_class(**camera_class.extract_parameters(hparams))
         else:
             raise ValueError(f'Unknown camera type: {hparams.camera_type}')
+
+        if hparams.init_optics:
+            ckpt, _ = utils.compatible_load(hparams.init_optics)
+            self.camera.load_state_dict(ckpt['state_dict'])
+        if hparams.init_cnn:
+            ckpt, _ = utils.compatible_load(hparams.init_cnn)
+            self.decoder.load_state_dict({
+                key[8:]: value
+                for key, value in ckpt['state_dict'].items()
+                if 'decoder' in key
+            })
+        utils.freeze_norm(self.decoder)  # todo
+        self.decoder.bulk_training = False
         if print_info:
             print(self.camera)
 
@@ -190,13 +202,13 @@ class SnapshotDepth(pl.LightningModule):
 
         if torch.tensor(self.hparams.psf_jitter):
             # Jitter the PSF on the evaluation as well.
-            captimgs, target_volumes, _ = self.camera.forward(
+            captimgs, target_volumes, _ = self.camera(
                 img_linear, depthmap, self.hparams.occlusion, torch.tensor(True)
             )
             # We don't want to use the jittered PSF for the pseudo inverse.
             psf = self.camera.psf_at_camera().unsqueeze(0)
         else:
-            captimgs, target_volumes, psf = self.camera.forward(
+            captimgs, target_volumes, psf = self.camera(
                 img_linear, depthmap, self.hparams.occlusion
             )
 
@@ -251,16 +263,6 @@ class SnapshotDepth(pl.LightningModule):
         states.update(self.camera.feature_parameters())
         return states
 
-    def load_state_dict(self, state_dict: Union[Dict[str, Tensor], Dict[str, Tensor]], strict: bool = True):
-        try:
-            return super().load_state_dict(state_dict, strict)
-        except RuntimeError as e:
-            msg = e.args[0]
-            keys = map(lambda k: k[1:-1], re.findall(r'"[^"]*"', msg))
-            for k in keys:
-                del state_dict[k]
-            return super().load_state_dict(state_dict, strict)
-
     def __step_common(
         self, data: dataset.ImageItem, mask: bool = False
     ) -> typing.Tuple[FinalOutput, torch.Tensor]:
@@ -268,7 +270,7 @@ class SnapshotDepth(pl.LightningModule):
         if depth_conf.ndim == 4:
             depth_conf = utils.crop_boundary(depth_conf, self.crop_width * 2)
 
-        outputs = self.forward(data[1], data[2], is_testing=torch.tensor(False))
+        outputs = self(data[1], data[2], is_testing=torch.tensor(False))
 
         est, target = outputs.est_depthmap, outputs.target_depthmap
         if mask:

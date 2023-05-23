@@ -1,3 +1,6 @@
 [submodule "pytorch-ssim"]
 	path = pytorch-ssim
 	url = https://github.com/Po-Hsun-Su/pytorch-ssim.git
+[submodule "plotnn"]
+	path = plotnn
+	url = https://github.com/HarisIqbal88/PlotNeuralNet.git

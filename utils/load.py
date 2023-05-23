@@ -11,4 +11,12 @@ def compatible_load(ckpt_path: str):
     hparams.setdefault('norm', 'BN')
     hparams.setdefault('aperture_type', 'circular')
     hparams.setdefault('reconstructor_type', 'plain')
+    hparams.setdefault('depth_refine', True)  # todo
+    hparams.setdefault('init_optics', None)
+    hparams.setdefault('init_cnn', None)
+
+    # if hparams.get('base_ckpt', None) is not None:
+    #     hparams['init_optics'] = hparams['base_ckpt']
+    #     hparams['init_cnn'] = hparams['base_ckpt']
+
     return ckpt, hparams

@@ -1,8 +1,6 @@
 import sys
 import shutup
 
-import utils
-
 shutup.please()  # shield Pillow warning
 sys.path.append('pytorch-ssim')  # use pytorch-ssim by https://github.com/Po-Hsun-Su/pytorch-ssim.git
 
@@ -10,6 +8,7 @@ import re
 import argparse
 import os
 import random
+import json
 
 import torch
 import torch.nn.functional as functional
@@ -24,6 +23,7 @@ from dataset.sceneflow import SceneFlow
 from dataset.dualpixel import DualPixel
 from model.snapshotdepth import SnapshotDepth
 from model import FinalOutput
+import utils
 
 sf: Dataset = None
 dp: Dataset = None
@@ -82,6 +82,42 @@ def norm_select(table, metric_list):
     return np.argmax(np.sum(score, axis=1))
 
 
+def select_imgs(args):
+    global sf
+    if args.img_path is None:
+        args.img_path = f'sceneflow/{random.randint(0, len(sf) - 1)}'
+    dataset, img_id = args.img_path.split('/')
+    if re.match(r'^\d*$', img_id):
+        img_ids = [int(img_id)]
+    elif m := re.match(r'^(\d*)-(\d*)$', img_id):
+        img_ids = range(int(m.group(1)), int(m.group(2)) + 1)
+    elif re.match(r'^\[\d*(,\d*)*]$', img_id):
+        img_ids = img_id[1:-1].split(',')
+        img_ids = map(int, img_ids)
+    else:
+        raise ValueError(f'Wrong image sets: {img_id}')
+    return dataset, torch.tensor(img_ids).reshape(-1, args.batch_sz).numpy().tolist()
+
+
+def init_dataset(hparams):
+    global sf, dp
+    image_sz = hparams['image_sz']
+    crop_width = hparams['crop_width']
+    padding = 0
+    sf = SceneFlow(
+        '/home/ps/Data/Guojiaqi/dataset/sceneflow',
+        'val',
+        (image_sz + 4 * crop_width, image_sz + 4 * crop_width),
+        random_crop=False, augment=False, padding=padding, is_training=False
+    )
+    dp = DualPixel(
+        '/home/ps/Data/Guojiaqi/dataset/dualpixel',
+        image_size=(image_sz + 4 * crop_width, image_sz + 4 * crop_width),
+        random_crop=False, augment=False, padding=padding, upsample_factor=1,
+        partition='val', is_training=False
+    )
+
+
 criteria = {
     'rank': rank_select,
     'norm': norm_select
@@ -111,70 +147,51 @@ def model_eval(args, ckpt_path, device='cpu'):
 
     ckpt, hparams = utils.compatible_load(ckpt_path)
     hparams['psf_jitter'] = False
-    if args.override:
-        hparams.update(eval(args.override))
     if not apply_noise:
         hparams['noise_sigma_min'] = 0
         hparams['noise_sigma_max'] = 0
 
     if sf is None:
-        image_sz = hparams['image_sz']
-        crop_width = hparams['crop_width']
-        # padding = 4 * crop_width
-        padding = 0
-        sf = SceneFlow(
-            '/home/ps/Data/Guojiaqi/dataset/sceneflow',
-            'val',
-            (image_sz + 4 * crop_width, image_sz + 4 * crop_width),
-            random_crop=False, augment=False, padding=padding, is_training=False
-        )
-        dp = DualPixel(
-            '/home/ps/Data/Guojiaqi/dataset/dualpixel',
-            image_size=(image_sz + 4 * crop_width, image_sz + 4 * crop_width),
-            random_crop=False, augment=False, padding=padding, upsample_factor=1,
-            partition='val', is_training=False
-        )
+        init_dataset(hparams)
 
     model = SnapshotDepth.construct_from_checkpoint(ckpt)
     model = model.to(device)
     model.eval()
 
-    if args.img_path is None:
-        args.img_path = f'sceneflow/{random.randint(0, len(sf) - 1)}'
-    dataset, img_id = args.img_path.split('/')
-    if re.match(r'^\d*$', img_id):
-        img_ids = [int(img_id)]
-    elif m := re.match(r'^(\d*)-(\d*)$', img_id):
-        img_ids = range(int(m.group(1)), int(m.group(2)) + 1)
-    elif re.match(r'^\[\d*(,\d*)*]$', img_id):
-        img_ids = img_id[1:-1].split(',')
-        img_ids = map(int, img_ids)
-    else:
-        raise ValueError(f'Wrong image sets: {img_id}')
-    img_ids = torch.tensor(img_ids).reshape(-1, args.batch_sz)
+    dataset, img_ids = select_imgs(args)
 
-    metric_values = {}
-    for m in args.metrics:
-        metric_values[m] = 0
+    metric_values = {m: 0 for m in args.metrics}
 
     batch_total = len(img_ids)
-    batches = img_ids if args.output else tqdm(img_ids, ncols=50, unit='batch')
     repetition = 1 if not apply_noise else 5
-    for batch in batches:
+    records = []
+    for batch in tqdm(img_ids, ncols=50, unit='batch'):
         item = get_item(dataset, batch, args.device)
+        losses = {m: 0 for m in args.metrics}
         for _ in range(repetition):
-            output: FinalOutput = model.forward(item[0], item[1], False)
+            output: FinalOutput = model(item[0], item[1], False)
             est_depthmap = output.est_depthmap * (hparams['max_depth'] - hparams['min_depth'])
             target_depthmap = output.target_depthmap * (hparams['max_depth'] - hparams['min_depth'])
 
-            for metric, func in metrics.items():
+            for metric in args.metrics:
                 if metric.startswith('img'):
-                    metric_values[metric] += func(output.est_img, output.target_img)
+                    pair = (output.est_img, output.target_img)
                 elif metric.startswith('depth'):
-                    metric_values[metric] += func(est_depthmap, target_depthmap)
+                    pair = (est_depthmap, target_depthmap)
+                else:
+                    raise ValueError(f'Wrong metric name: {metric}')
+                loss = metrics[metric](*pair)
+                metric_values[metric] += loss
+                losses[metric] += loss
 
-    if not args.output:
-        print(f'Complete: {ckpt_path}')
+        records.append({'img_ids': batch, 'loss': {m: v / repetition for m, v in losses.items()}})
+
+    if args.dump_record:
+        file_name = f'{args.experiment_name}-v{args.ckpt_version}-{os.path.basename(ckpt_path)[:-5]}.json'
+        with open(f'result/{file_name}', 'w') as out:
+            json.dump(records, out)
+
+    print(f'Complete: {ckpt_path}')
     return list(map(lambda m: m / (batch_total * repetition), metric_values.values()))
 
 
@@ -192,11 +209,6 @@ def main(args):
         ckpt_names = list(filter(lambda x: x.endswith('.ckpt'), os.listdir(ckpt_dir)))
     ckpt_paths = list(map(lambda x: os.path.join(ckpt_dir, x), ckpt_names))
 
-    if args.output:
-        output = open(args.output, 'w')
-    else:
-        output = sys.stdout
-
     results = []
     for path, name in zip(ckpt_paths, ckpt_names):
         results.append([name] + model_eval(args, path, device=args.device))
@@ -206,17 +218,14 @@ def main(args):
     results.append([_ for _ in results[best_one]])
     results[-1][0] = f'best:{results[-1][0]}'
 
-    output.write(f'version: {args.ckpt_version}\n')
-    output.write(tabulate(
+    print(f'version: {args.ckpt_version}\n')
+    print(tabulate(
         results,
         headers=['name'] + args.metrics,
         tablefmt='pipe' if args.format == 'markdown' else 'simple',
         floatfmt=floatfmt,
         colalign=['center'] * len(results[0])
     ))
-    output.write('\n')
-    if args.output:
-        output.close()
 
 
 if __name__ == '__main__':
@@ -228,11 +237,10 @@ if __name__ == '__main__':
     parser.add_argument('--repetition', type=int, default=1)
     parser.add_argument('--device', type=str, default='cpu')
     parser.add_argument('--batch_sz', type=int, default=4)
-    parser.add_argument('--output', type=str, default='')
     parser.add_argument('--metrics', type=str, nargs='+')
-    parser.add_argument('--override', type=str, default='')
     parser.add_argument('--format', type=str, default='default')
     parser.add_argument('--criterion', type=str, default='norm')
     parser.add_argument('--noise', type=str, default='')
+    parser.add_argument('--dump_record', default=False, action='store_true')
 
     main(parser.parse_args())

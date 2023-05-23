@@ -1,12 +1,10 @@
-import collections
-
 import torch
-import torch.nn as nn
 
 from .unet import UNet
-from .dnet import DNet
 from .base import *
 import utils
+
+__all__ = ['VolumeGuided']
 
 
 class VolumeGuided(nn.Module):
@@ -30,9 +28,14 @@ class VolumeGuided(nn.Module):
 
         kwargs = {'kernel_size': 3, 'padding': 1, 'bias': False}
         self.att_layers = nn.ModuleList([
-            GuidedConv(CH_RGB, 8, n_depth * CH_RGB, **kwargs),
-            GuidedConv(8, 16, n_depth * CH_RGB, **kwargs),
-            GuidedConv(16, 32, n_depth * CH_RGB, **kwargs)
+            GuidedConv(CH_RGB, 8, n_depth * 4, **kwargs),
+            GuidedConv(8, 16, n_depth * 8, **kwargs),
+            GuidedConv(16, 32, n_depth * 16, **kwargs)
+        ])
+        self.vol_convs = nn.ModuleList([
+            VolConv(n_depth * CH_RGB, n_depth * 4, **kwargs),
+            VolConv(n_depth * 4, n_depth * 8, **kwargs),
+            VolConv(n_depth * 8, n_depth * 16, **kwargs)
         ])
 
         output_blocks = [nn.Conv2d(32, CH_RGB + CH_DEPTH, kernel_size=1, bias=True)]
@@ -50,8 +53,9 @@ class VolumeGuided(nn.Module):
         pin_volume = torch.reshape(pin_volume, (b, c * d, h, w))
         x = capt_img
 
-        for att_layer in self.att_layers:
-            x = att_layer(x, pin_volume)
+        for i in range(len(self.att_layers)):
+            pin_volume = self.vol_convs[i](pin_volume)
+            x = self.att_layers[i](x, pin_volume)
 
         est = torch.sigmoid(self.net(x))
         return ReconstructionOutput(est[:, :-1], est[:, [-1]])
