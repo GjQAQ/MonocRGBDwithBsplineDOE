@@ -97,8 +97,8 @@ class SnapshotDepth(pl.LightningModule):
                 for key, value in ckpt['state_dict'].items()
                 if 'decoder' in key
             })
-        utils.freeze_norm(self.decoder)  # todo
-        self.decoder.bulk_training = False
+        # utils.freeze_norm(self.decoder)  # todo
+        # self.decoder.bulk_training = False
         if print_info:
             print(self.camera)
 
@@ -125,8 +125,8 @@ class SnapshotDepth(pl.LightningModule):
             optimizer.param_groups[0]['lr'] = lr_scale * self.hparams.optics_lr
             optimizer.param_groups[1]['lr'] = lr_scale * self.hparams.cnn_lr
 
-        if epoch >= 20 and epoch % 5 == 0:
-            optimizer.param_groups[1]['lr'] *= 0.8
+        if epoch >= 30 and epoch % 5 == 0:
+            optimizer.param_groups[1]['lr'] *= 0.5
 
         optimizer.step()
         optimizer.zero_grad()

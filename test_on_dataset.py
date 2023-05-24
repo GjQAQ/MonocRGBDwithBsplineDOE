@@ -118,6 +118,15 @@ def init_dataset(hparams):
     )
 
 
+def dump_record(experiment_name, filename, record):
+    dirpath = f'result/{experiment_name}'
+    if not os.path.exists(dirpath):
+        os.mkdir(dirpath)
+
+    with open(os.path.join(dirpath, filename), 'w') as out:
+        json.dump(record, out)
+
+
 criteria = {
     'rank': rank_select,
     'norm': norm_select
@@ -140,13 +149,15 @@ def get_item(dataset, img_ids, device='cpu'):
 
 
 @torch.no_grad()
-def model_eval(args, ckpt_path, device='cpu'):
+def eval_checkpoint(args, ckpt_path, device='cpu', override=None):
     global sf, dp
     device = torch.device(device)
     apply_noise = args.noise == 'standard'
 
     ckpt, hparams = utils.compatible_load(ckpt_path)
     hparams['psf_jitter'] = False
+    if override:
+        hparams.update(override)
     if not apply_noise:
         hparams['noise_sigma_min'] = 0
         hparams['noise_sigma_max'] = 0
@@ -187,15 +198,17 @@ def model_eval(args, ckpt_path, device='cpu'):
         records.append({'img_ids': batch, 'loss': {m: v / repetition for m, v in losses.items()}})
 
     if args.dump_record:
-        file_name = f'{args.experiment_name}-v{args.ckpt_version}-{os.path.basename(ckpt_path)[:-5]}.json'
-        with open(f'result/{file_name}', 'w') as out:
-            json.dump(records, out)
+        dump_record(
+            args.experiment_name,
+            f'v{args.ckpt_version}-{os.path.basename(ckpt_path)[:-5]}.json',
+            records
+        )
 
     print(f'Complete: {ckpt_path}')
     return list(map(lambda m: m / (batch_total * repetition), metric_values.values()))
 
 
-def main(args):
+def eval_model(args, override=None):
     for m in args.metrics:
         if m not in metrics:
             raise ValueError(f'Unknown metric: {m}')
@@ -211,7 +224,7 @@ def main(args):
 
     results = []
     for path, name in zip(ckpt_paths, ckpt_names):
-        results.append([name] + model_eval(args, path, device=args.device))
+        results.append([name] + eval_checkpoint(args, path, device=args.device, override=override))
     best_one = criteria[args.criterion](results, args.metrics)
     if args.format == 'markdown':
         results = md_annotate(results, args.metrics)
@@ -226,9 +239,10 @@ def main(args):
         floatfmt=floatfmt,
         colalign=['center'] * len(results[0])
     ))
+    return args.metrics, results
 
 
-if __name__ == '__main__':
+def config_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--img_path', type=str, default=None)
     parser.add_argument('--experiment_name', type=str, default='ExtendedDOF')
@@ -243,4 +257,8 @@ if __name__ == '__main__':
     parser.add_argument('--noise', type=str, default='')
     parser.add_argument('--dump_record', default=False, action='store_true')
 
-    main(parser.parse_args())
+    return parser
+
+
+if __name__ == '__main__':
+    eval_model(config_args().parse_args())

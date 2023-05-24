@@ -6,6 +6,7 @@ import torch.nn as nn
 from .unet import UNet
 from .dnet import DNet
 from .refiner import DepthRefiner
+from .base import layerd_sigmoid
 import utils
 
 CH_DEPTH = 1

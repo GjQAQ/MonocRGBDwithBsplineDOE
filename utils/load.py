@@ -7,13 +7,14 @@ def compatible_load(ckpt_path: str):
     hparams: dict = ckpt['hyper_parameters']
     hparams.setdefault('effective_psf_factor', 2)
     hparams.setdefault('dynamic_conv', False)
-    hparams.setdefault('initialization_type', 'default')
     hparams.setdefault('norm', 'BN')
     hparams.setdefault('aperture_type', 'circular')
     hparams.setdefault('reconstructor_type', 'plain')
-    hparams.setdefault('depth_refine', True)  # todo
-    hparams.setdefault('init_optics', None)
-    hparams.setdefault('init_cnn', None)
+    hparams.setdefault('depth_refine', False)
+    hparams.setdefault('init_optics', '')
+    hparams.setdefault('init_cnn', '')
+
+    hparams['initialization_type'] = 'default'
 
     # if hparams.get('base_ckpt', None) is not None:
     #     hparams['init_optics'] = hparams['base_ckpt']

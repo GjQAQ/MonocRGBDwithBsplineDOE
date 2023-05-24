@@ -23,40 +23,6 @@ def __edgetaper3d(img: torch.Tensor, psf: torch.Tensor) -> torch.Tensor:
     return alpha * img + (1 - alpha) * blurred_img
 
 
-def __tikhonov_inverse_closed_form(
-    y: torch.Tensor, g: torch.Tensor, gamma=0.1
-) -> torch.Tensor:
-    """
-    A simplified version of tikhonov_inverse_fast() (dfd)
-    Supports dataformat=BCSDHW only
-    """
-    device, dtype = y.device, y.dtype
-    ch_color, ch_shot, n_depth, height, width = g.shape[1:6]
-    batch = y.shape[0]
-    if not isinstance(gamma, torch.Tensor):
-        gamma = torch.tensor(gamma, device=device, dtype=dtype)
-
-    y = utils.complex_reshape(y, [batch, ch_color, ch_shot, 1, -1]).transpose(2, 4)
-    g = utils.complex_reshape(g, [1, ch_color, ch_shot, n_depth, -1]).transpose(2, 4)
-    g_c = g.conj()
-
-    part1 = y * g_c
-    part1 = part1.sum(dim=-1, keepdim=True)
-
-    g_h = g_c.transpose(3, 4)
-    if ch_shot == 1:
-        ip = utils.complex_matmul(g_h, g)
-        op = utils.complex_matmul(g, g_h)
-        part2 = (torch.eye(n_depth, device=device, dtype=dtype) - op / (gamma + ip)) / gamma
-    else:
-        raise NotImplementedError('It should not reach here')
-
-    return utils.complex_reshape(
-        utils.complex_matmul(part2, part1).transpose(2, 3),
-        [batch, ch_color, n_depth, height, width]
-    )
-
-
 def __old_tikhonov_inverse_closed_form(
     y: torch.Tensor, g: torch.Tensor, gamma=0.1
 ) -> torch.Tensor:

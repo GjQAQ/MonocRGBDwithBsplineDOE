@@ -149,6 +149,6 @@ if __name__ == '__main__':
 
     spectrum = spectrum ** args.scale_exponent
     if args.save_path is None:
-        utils.show_spectrum(spectrum.detach())
+        utils.plot_spectrum(spectrum.detach())
     else:
-        utils.show_spectrum(spectrum.detach(), save=True, path=args.save_path, id=args.id)
+        utils.plot_spectrum(spectrum.detach(), save=True, path=args.save_path, id=args.id)

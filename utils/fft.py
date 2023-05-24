@@ -14,26 +14,12 @@ def fftshift(x, dims=(-1, -2)):
     return x
 
 
-def ifftshift(x, dims):
-    shifts = [(x.size(dim) + 1) // 2 for dim in dims]
-    x = torch.roll(x, shifts=shifts, dims=dims)
-    return x
-
-
 def rfft2(x: torch.Tensor):
     return fft.rfftn(x, x.shape[-2:])
 
 
 def irfft2(x, size):
     return fft.irfftn(x, size)
-
-
-def fft2(x):
-    return fft.fftn(x, x.shape[-2:])
-
-
-def conv2(x, y):
-    return irfft2(rfft2(x) * rfft2(y), x.shape[-2:])
 
 
 def autocorrelation1d(x: torch.Tensor) -> torch.Tensor:

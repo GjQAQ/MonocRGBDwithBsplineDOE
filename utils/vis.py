@@ -1,4 +1,6 @@
 import os
+import json
+from typing import List
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -43,7 +45,7 @@ def __plot_featmaps(prefix, img):
     pass  # todo
 
 
-def show_spectrum(spectrum, info=True, save=False, **kwargs):
+def plot_spectrum(spectrum, info=True, save=False, **kwargs):
     """
     Plot 4D spectrum of defocus kernel.
     Note that rcParams['figure.dpi'] is expected to be 100 here.
@@ -84,3 +86,62 @@ def show_spectrum(spectrum, info=True, save=False, **kwargs):
             axs[y][x].imshow(spectrum[y][x], cmap='gray')
 
     plt.show()
+
+
+__metric_title = {
+    'img_mae': 'Image MAE',
+    'img_ssim': 'Image SSIM',
+    'img_psnr': 'Image PSNR',
+    'depth_mae': 'Depth MAE',
+    'depth_rmse': 'Depth.RMSE'
+}
+__y_label = {
+    'img_psnr': r'PSNR/$dB$',
+    'depth_mae': r'MAE/$m$',
+    'depth_rmse': r'RMSE/$m'
+}
+
+
+def plot_performance_curve(
+    data_paths: List[str],
+    saving_path: str = None,
+    h_axis='s'
+):
+    if h_axis not in ('s', 'd'):
+        raise ValueError(f'h_axis must be "s" or "d", but got {h_axis}')
+    if saving_path is not None and not os.path.exists(saving_path):
+        os.mkdir(saving_path)
+
+    records = {}
+    for data_path in data_paths:
+        with open(data_path) as f:
+            data = json.load(f)
+        metrics = data['metrics']
+        label = data['label']
+        metric_values = list(zip(*data['measurements']))
+
+        for i, m in enumerate(metrics):
+            if m not in records:
+                records[m] = {}
+            records[m][label] = {
+                's': np.array(data['slope_range']),
+                'd1': np.array(data['min_depth']),
+                'd2': np.array(data['max_depth']),
+                'v': np.array(metric_values[i])
+            }
+
+    for m, record in records.items():
+        fig, ax = plt.subplots()
+        ax.set_title(__metric_title[m])
+        ax.set_xlabel('$S$' if h_axis == 's' else r'$\text{DOF}/m$')
+        ax.set_ylabel(__y_label.get(m, ''))
+        for label, data in record.items():
+            x = data['s'] if h_axis == 's' else data['d2'] - data['d1']
+            ax.plot(x, data['v'], label=label)
+
+        ax.legend()
+
+        if saving_path is None:
+            plt.show()
+        else:
+            fig.savefig(os.path.join(saving_path, f'{m}.png'))

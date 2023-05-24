@@ -14,35 +14,6 @@ def _over_op(alpha):
     return torch.cat([torch.ones((bs, cs, 1, hs, ws), dtype=out.dtype, device=out.device), out[:, :, :-1]], dim=-3)
 
 
-def __image_formation(volume, layered_depth, psf, occlusion, eps=1e-3):
-    scale = volume.max()
-    volume = volume / scale
-    f_psf = fft.rfft2(psf)
-
-    def conv_psf(x):
-        return fft.irfft2(fft.rfft2(x) * f_psf, x.shape[-2:])
-
-    if occlusion:
-        blurred_alpha_rgb = conv_psf(layered_depth)
-        blurred_volume = conv_psf(volume)
-
-        # Normalize the blurred intensity
-        cumsum_alpha = torch.flip(torch.cumsum(torch.flip(layered_depth, dims=(-3,)), dim=-3), dims=(-3,))
-        blurred_cumsum_alpha = conv_psf(cumsum_alpha)
-
-        blurred_volume = blurred_volume / (blurred_cumsum_alpha + eps)
-        blurred_alpha_rgb = blurred_alpha_rgb / (blurred_cumsum_alpha + eps)
-
-        over_alpha = _over_op(blurred_alpha_rgb)
-        captimg = torch.sum(over_alpha * blurred_volume, dim=-3)
-    else:
-        captimg = conv_psf(volume)
-
-    captimg = scale * captimg
-    volume = scale * volume
-    return captimg, volume
-
-
 def __old_image_formation(volume, layered_mask, psf, occlusion, eps=1e-3):
     scale = volume.max()
     volume = volume / scale
