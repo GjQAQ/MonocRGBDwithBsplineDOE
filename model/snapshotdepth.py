@@ -1,3 +1,4 @@
+import re
 import typing
 import collections
 import argparse
@@ -262,6 +263,16 @@ class SnapshotDepth(pl.LightningModule):
         states = super().state_dict(destination, prefix, keep_vars)
         states.update(self.camera.feature_parameters())
         return states
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        try:
+            return super().load_state_dict(state_dict, strict)
+        except RuntimeError as e:
+            msg = e.args[0]
+            keys = map(lambda k: k[1:-1], re.findall(r'"[^"]*"', msg))
+            for k in keys:
+                del state_dict[k]
+            return super().load_state_dict(state_dict, strict)
 
     def __step_common(
         self, data: dataset.ImageItem, mask: bool = False

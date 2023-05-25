@@ -27,10 +27,6 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
 
         if init_type == 'lattice_focal':
             init = self.lattice_focal_init()
-        elif init_type.startswith('existent'):
-            ckpt = torch.load(init_type[9:], map_location=lambda storage, loc: storage)
-            self.load_state_dict(ckpt['state_dict'])
-            init = None
         else:
             init = torch.zeros(linear)
         if init is not None:
@@ -105,7 +101,7 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
     @classmethod
     def extract_parameters(cls, hparams, **kwargs) -> typing.Dict:
         it = hparams.initialization_type
-        if it not in ('default', 'lattice_focal') and not it.startswith('existent'):
+        if it not in ('default', 'lattice_focal'):
             raise ValueError(f'Unsupported initialization type: {it}')
 
         base = super().extract_parameters(hparams, **kwargs)

@@ -59,10 +59,6 @@ class RotationallySymmetricCamera(optics.base.Camera):
 
         self.__build_camera()
 
-        if init_type.startswith('existent'):
-            ckpt = torch.load(init_type[9:], map_location=lambda storage, loc: storage)
-            self.load_state_dict(ckpt['state_dict'])
-
     def psf(self, scene_distances, modulate_phase):
         # As this quadruple will be copied to the other three, rho = 0 is avoided.
         psf1d = self.__psf1d(self.buf_h, scene_distances, modulate_phase)
@@ -127,7 +123,7 @@ class RotationallySymmetricCamera(optics.base.Camera):
     @classmethod
     def extract_parameters(cls, hparams, **kwargs) -> typing.Dict:
         init_type = hparams.initialization_type
-        if init_type != 'default' and not init_type.startswith('existent'):
+        if init_type != 'default':
             raise ValueError(f'Unsupported initialization type: {hparams.initialization_type}')
 
         base = super().extract_parameters(hparams, **kwargs)

@@ -3,7 +3,7 @@ import os.path
 
 import numpy as np
 
-from test_on_dataset import config_args, eval_model
+from utils import config_args, eval_model
 
 
 def min_depth(d, s):
@@ -38,6 +38,6 @@ if __name__ == '__main__':
     result['metrics'] = m
 
     if not os.path.exists(args.saving_dir):
-        os.mkdir(args.saving_dir)
+        os.makedirs(args.saving_dir, exist_ok=True)
     with open(os.path.join(args.saving_dir, f'{args.label}.json'), 'w') as f:
         json.dump(result, f)

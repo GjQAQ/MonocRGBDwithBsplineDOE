@@ -60,11 +60,6 @@ class BSplineApertureCamera(optics.ClassicCamera):
 
         if init_type == 'lattice_focal':
             init = self.lattice_focal_init()
-        elif init_type.startswith('existent'):
-            ckpt = torch.load(init_type[9:], map_location=lambda storage, loc: storage)
-            self.__control_points = torch.zeros(grid_size)
-            self.load_state_dict(ckpt['state_dict'])
-            init = self.__control_points
         else:
             init = torch.zeros(grid_size)
         self.__control_points = torch.nn.Parameter(init, requires_grad=requires_grad)
@@ -143,7 +138,7 @@ class BSplineApertureCamera(optics.ClassicCamera):
     @classmethod
     def extract_parameters(cls, hparams, **kwargs) -> typing.Dict:
         it = hparams.initialization_type
-        if it not in ('default', 'lattice_focal') and not it.startswith('existent'):
+        if it not in ('default', 'lattice_focal'):
             raise ValueError(f'Unsupported initialization type: {it}')
 
         base = super().extract_parameters(hparams, **kwargs)

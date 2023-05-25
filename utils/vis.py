@@ -8,6 +8,7 @@ import torch
 import torchvision.io as tvio
 
 import algorithm
+import utils
 
 
 def __spectrum_format_tick(ticks: np.ndarray):
@@ -88,12 +89,12 @@ def plot_spectrum(spectrum, info=True, save=False, **kwargs):
     plt.show()
 
 
-__metric_title = {
-    'img_mae': 'Image MAE',
-    'img_ssim': 'Image SSIM',
-    'img_psnr': 'Image PSNR',
-    'depth_mae': 'Depth MAE',
-    'depth_rmse': 'Depth.RMSE'
+__metric_alias = {
+    'img_mae': 'MAE',
+    'img_ssim': 'SSIM',
+    'img_psnr': 'PSNR',
+    'depth_mae': 'MAE',
+    'depth_rmse': 'RMSE'
 }
 __y_label = {
     'img_psnr': r'PSNR/$dB$',
@@ -110,7 +111,7 @@ def plot_performance_curve(
     if h_axis not in ('s', 'd'):
         raise ValueError(f'h_axis must be "s" or "d", but got {h_axis}')
     if saving_path is not None and not os.path.exists(saving_path):
-        os.mkdir(saving_path)
+        os.makedirs(saving_path, exist_ok=True)
 
     records = {}
     for data_path in data_paths:
@@ -132,7 +133,7 @@ def plot_performance_curve(
 
     for m, record in records.items():
         fig, ax = plt.subplots()
-        ax.set_title(__metric_title[m])
+        ax.set_title(('Image ' if m.startswith('img') else 'Depth ') + __metric_alias[m])
         ax.set_xlabel('$S$' if h_axis == 's' else r'$\text{DOF}/m$')
         ax.set_ylabel(__y_label.get(m, ''))
         for label, data in record.items():
@@ -145,3 +146,49 @@ def plot_performance_curve(
             plt.show()
         else:
             fig.savefig(os.path.join(saving_path, f'{m}.png'))
+
+
+def inspect_samples(
+    index: int,
+    ckpt_path: str,
+    labels: str,
+    saving_path: str = None,
+    color=(0, 0, 0),
+    device='cpu'
+):
+    if saving_path is not None and not os.path.exists(os.path.join(saving_path, labels)):
+        os.makedirs(os.path.join(saving_path, labels), exist_ok=True)
+
+    metrics, [imgs] = utils.eval_checkpoint(
+        ('img_psnr', 'depth_mae'),
+        ckpt_path,
+        device=device,
+        noise='standard',
+        img_path=f'sceneflow/{index}',
+        batch_sz=1,
+        repetition=1,
+        record_img=True,
+        dump_record=False
+    )
+
+    dpi = plt.rcParams['figure.dpi']
+    annotation = (None, None, f'PSNR={metrics[0]:.3g}', None, f'MAE=${metrics[1]:.3g}m$')
+    tag = ('capt_img', 'target_img', 'est_img', 'target_depthmap', 'est_depthmap')
+    for i in range(len(tag)):
+        img = getattr(imgs, tag[i])
+        h, w = img.shape[-2:]
+        fig, ax = plt.subplots(figsize=(w / dpi, h / dpi))
+        ax.set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
+
+        ax.imshow(img[0].detach().permute(1, 2, 0).squeeze(), cmap='inferno')
+        ax.text(
+            1, 0, annotation[i],
+            ha='right', va='bottom', transform=ax.transAxes,
+            color=color
+        )
+        fig.subplots_adjust(left=0, bottom=0, right=1, top=1)
+
+        if saving_path is not None:
+            fig.savefig(os.path.join(saving_path, labels, f'{index}-{tag[i]}.png'))
+        else:
+            plt.show()
