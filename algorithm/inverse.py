@@ -85,4 +85,4 @@ def tikhonov_inverse(
         torch.rfft(psf, 2).unsqueeze(2),
         gamma=regularizer
     )
-    return torch.irfft(est_x_ft, 2, signal_sizes=capt_img.shape[-2:])
+    return myfft.fftshift(torch.irfft(est_x_ft, 2, signal_sizes=capt_img.shape[-2:]))
