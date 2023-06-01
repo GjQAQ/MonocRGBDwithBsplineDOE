@@ -57,7 +57,7 @@ def __init_dataset(hparams):
     global __sf, __dp
     image_sz = hparams['image_sz']
     crop_width = hparams['crop_width']
-    padding = 0
+    padding = hparams.get('padding', 0)
     __sf = dataset.SceneFlow(
         '/home/ps/Data/Guojiaqi/dataset/sceneflow',
         'val',
@@ -232,9 +232,11 @@ def eval_model(args, override=None):
     ckpt_paths = list(map(lambda x: os.path.join(ckpt_dir, x), ckpt_names))
 
     results = []
+    kwargs = vars(args).copy()
+    del kwargs['metrics']
     for path, name in zip(ckpt_paths, ckpt_names):
         results.append([name] + eval_checkpoint(
-            args.metrics, path, override=override, **vars(args)
+            args.metrics, path, override=override, **kwargs
         )[0])
     best_one = __criteria[args.criterion](results, args.metrics)
     if args.format == 'markdown':
@@ -259,7 +261,7 @@ def config_args():
     parser.add_argument('--experiment_name', type=str, default='ExtendedDOF')
     parser.add_argument('--ckpt_version', type=int)
     parser.add_argument('--ckpt_file', type=str, default=None)
-    parser.add_argument('--repetition', type=int, default=1)
+    parser.add_argument('--repetition', type=int, default=5)
     parser.add_argument('--device', type=str, default='cpu')
     parser.add_argument('--batch_sz', type=int, default=4)
     parser.add_argument('--metrics', type=str, nargs='+')

@@ -1,3 +1,6 @@
 [submodule "pytorch-ssim"]
 	path = pytorch-ssim
 	url = https://github.com/Po-Hsun-Su/pytorch-ssim.git
+[submodule "debayer"]
+	path = debayer
+	url = https://github.com/cheind/pytorch-debayer.git
