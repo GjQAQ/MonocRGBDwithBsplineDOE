@@ -126,7 +126,6 @@ def plot_spectrum(spectrum, label: str, saving_path=None, **kwargs):
     :param saving_path: Path where figure will be saved. Displaying figure if None specified.
     :param kwargs: Detailed options used for plotting
     """
-    # todo: work when dpi is not 100
     space = kwargs.get('space', 2)
     size = kwargs.get('size', 100)
     margin = kwargs.get('margin', 1)

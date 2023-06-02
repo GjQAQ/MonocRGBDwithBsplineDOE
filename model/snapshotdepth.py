@@ -26,16 +26,6 @@ optics_models = {
     'b-spline': optics.BSplineApertureCamera,
     'zernike': optics.ZernikeApertureCamera
 }
-reconstructors = {
-    'plain': reco.Reconstructor,
-    'depth-guided': reco.DepthGuidedReconstructor,
-    'vol-guided': reco.VolumeGuided,
-}
-norm_dict = {
-    'BN': torch.nn.BatchNorm2d,
-    'LN': torch.nn.LayerNorm,
-    'IN': torch.nn.InstanceNorm2d
-}
 FinalOutput = collections.namedtuple(
     'FinalOutput',
     ['capt_img', 'capt_linear', 'est_img', 'est_depthmap', 'target_img', 'target_depthmap', 'psf']
@@ -61,7 +51,7 @@ class SnapshotDepth(pl.LightningModule):
             'mse_depthmap': regression.MeanSquaredError(),
             'mae_image': regression.MeanAbsoluteError(),
             'mse_image': regression.MeanSquaredError(),
-            'vgg_image': regression.MeanSquaredError(),
+            'vgg_image': regression.MeanSquaredError(),  # todo: as is original, fix this
         }
         self.__loss_weights = [
             hparams.depth_loss_weight,
@@ -71,11 +61,14 @@ class SnapshotDepth(pl.LightningModule):
         ]
 
         self.log_dir = log_dir
-        self.decoder = reconstructors[hparams.reconstructor_type](
-            hparams.n_depths,
-            norm_dict[hparams.norm.upper()],
-            **{'depth_refine': hparams.depth_refine} if hparams.reconstructor_type == 'plain' else {}
-        )
+
+        name = hparams.reconstructor_type
+        # name = 'depth-guided'
+        self.decoder = reco.construct_model(name)
+        if hparams.init_cnn:
+            ckpt, _ = utils.compatible_load(hparams.init_cnn)
+            self.decoder.load_state_dict(utils.load_decoder_dict(ckpt))
+
         self.debayer = debayer.Debayer3x3()
 
         self.image_lossfn = Vgg16PerceptualLoss()
@@ -87,19 +80,10 @@ class SnapshotDepth(pl.LightningModule):
             self.camera = camera_class(**camera_class.extract_parameters(hparams))
         else:
             raise ValueError(f'Unknown camera type: {hparams.camera_type}')
-
         if hparams.init_optics:
             ckpt, _ = utils.compatible_load(hparams.init_optics)
             self.camera.load_state_dict(ckpt['state_dict'])
-        if hparams.init_cnn:
-            ckpt, _ = utils.compatible_load(hparams.init_cnn)
-            self.decoder.load_state_dict({
-                key[8:]: value
-                for key, value in ckpt['state_dict'].items()
-                if 'decoder' in key
-            })
-        # utils.freeze_norm(self.decoder)  # todo
-        # self.decoder.bulk_training = False
+
         if print_info:
             print(self.camera)
 
@@ -126,8 +110,10 @@ class SnapshotDepth(pl.LightningModule):
             optimizer.param_groups[0]['lr'] = lr_scale * self.hparams.optics_lr
             optimizer.param_groups[1]['lr'] = lr_scale * self.hparams.cnn_lr
 
-        if epoch >= 30 and epoch % 5 == 0:
-            optimizer.param_groups[1]['lr'] *= 0.5
+        # if epoch >= 15 and epoch % 5 == 0:
+        #     t = ((epoch - 15) // 5) + 1
+        #     optimizer.param_groups[0]['lr'] = self.hparams.optics_lr * 0.8 ** t
+        #     optimizer.param_groups[1]['lr'] = self.hparams.cnn_lr * 0.5 ** t
 
         optimizer.step()
         optimizer.zero_grad()
@@ -242,7 +228,8 @@ class SnapshotDepth(pl.LightningModule):
         )
 
         # Feed the cropped images to CNN
-        model_outputs = self.decoder(captimgs, pinv_volumes)
+        model_outputs = self.decoder(captimgs, pinv_volumes, utils.crop_boundary(depthmap, self.crop_width))  # todo
+        # model_outputs = self.decoder(captimgs, pinv_volumes)
 
         # Require twice cropping because the image formation also crops the boundary.
         target_images = utils.crop_boundary(img, 2 * self.crop_width)
@@ -382,11 +369,7 @@ class SnapshotDepth(pl.LightningModule):
         hparams = ckpt['hyper_parameters']
         model = SnapshotDepth(hparams, print_info=print_info)
         model.camera.load_state_dict(ckpt['state_dict'])
-        model.decoder.load_state_dict({
-            key[8:]: value
-            for key, value in ckpt['state_dict'].items()
-            if 'decoder' in key
-        })
+        model.decoder.load_state_dict(utils.load_decoder_dict(ckpt))
         return model
 
     @staticmethod

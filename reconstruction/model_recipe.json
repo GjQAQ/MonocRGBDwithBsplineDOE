@@ -1,0 +1,12 @@
+{
+  "plain": {
+    "n_depth": 16
+  },
+  "depth-guided": {
+    "depth_estimator_type": "plain",
+    "ckpt_path": "log/ls/version_1/model-v2.ckpt",
+    "unet_path": "log/ls/version_1/model-v2.ckpt",
+    "train_depth": false,
+    "train_image": true
+  }
+}

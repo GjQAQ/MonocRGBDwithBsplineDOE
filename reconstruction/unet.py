@@ -7,7 +7,7 @@ __all__ = ['UNet']
 
 
 class ConvolutionBlock(nn.Module):
-    def __init__(self, ch_in: int, ch_out: int, norm: nn.Module, momentum=0.01):
+    def __init__(self, ch_in: int, ch_out: int, norm: nn.Module, momentum=1e-2):
         super().__init__()
         bias = (norm is nn.Identity)
 

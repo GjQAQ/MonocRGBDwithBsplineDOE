@@ -16,7 +16,6 @@
   "augment": {"default": false, "action": "store_true"},
   "reg_tikhonov": {"type": "float", "default": 1},
 
-  "norm": {"type": "str", "default": "BN"},
   "reconstructor_type": {"type": "str", "default": "plain"},
   "initialization_type": {"type": "str", "default": "default"},
   "aperture_type": {"type": "str", "default": "circular"},
@@ -56,7 +55,6 @@
     "optimize_optics": false,
     "log_misc": false,
     "double_precision": false,
-    "depth_refine": false,
     "psfjitter": {
       "dest": "psf_jitter",
       "default": true

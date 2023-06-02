@@ -4,9 +4,7 @@ import torch
 import torch.nn as nn
 
 from .unet import UNet
-from .dnet import DNet
-from .refiner import DepthRefiner
-from .base import layerd_sigmoid
+from .base import EstimatorBase
 import utils
 
 CH_DEPTH = 1
@@ -14,47 +12,42 @@ CH_RGB = 3
 ReconstructionOutput = collections.namedtuple('ReconstructionOutput', ['est_img', 'est_depthmap'])
 
 
-class Reconstructor(nn.Module):
-    """
-    A reconstructor for captured image.
-    Composed of three module: an input layer, a U-Net and an output layer.
-    Input:
-        1. Captured image (B x C x H x W)
-        2. Pre-inversed image volume (B x C x D x H x W)
-    Output:
-        1. Reconstructed image (B x 3 x H x W)
-        2. Estimated depthmap (B x 1 x H x W)
-    """
+class Reconstructor(EstimatorBase):
 
     def __init__(
         self,
         n_depth: int = 16,
-        norm_layer=None,
-        depth_refine=False
+        estimate_depth=True,
+        estimate_image=True
     ):
+        if not (estimate_depth or estimate_image):
+            raise ValueError(f'Reconstructor estimates nothing.')
+
         super().__init__()
+        self._depth = estimate_depth
+        self._image = estimate_image
+
         self.__bulk_training = True
-        ch_pin = CH_RGB * (n_depth + 1)
+        ch_pin = 3 * (n_depth + 1)
         ch_base = 32
+        ch_out = 3 * int(estimate_image) + 1 * int(estimate_depth)
 
         input_layer = nn.Sequential(
             nn.Conv2d(ch_pin, ch_pin, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(ch_pin),
+            nn.BatchNorm2d(ch_pin, momentum=0.1),
             nn.ReLU(),
             nn.Conv2d(ch_pin, ch_base, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(ch_base),
+            nn.BatchNorm2d(ch_base, momentum=0.1),
             nn.ReLU()
         )
 
-        output_blocks = [nn.Conv2d(ch_base, CH_RGB + CH_DEPTH, kernel_size=1, bias=True)]
+        output_blocks = [nn.Conv2d(ch_base, ch_out, kernel_size=1, bias=True)]
         output_layer = nn.Sequential(*output_blocks)
         self.__decoder = nn.Sequential(
             input_layer,
-            UNet([ch_base, 32, 64, 64, 128], norm_layer),
-            # DNet((32, 32, 64, 64, 128)),
+            UNet([ch_base, ch_base, 64, 64, 128]),
             output_layer,
         )
-        self.refiner = DepthRefiner() if depth_refine else None  # todo
 
         utils.init_module(self)
 
@@ -63,26 +56,12 @@ class Reconstructor(nn.Module):
         inputs = torch.cat([capt_img.unsqueeze(2), pin_volume], 2)
 
         est = self.__decoder(inputs.reshape(b, -1, h, w))
-        img, depth = est[:, :-1], est[:, [-1]]
+        est = torch.sigmoid(est)
 
-        img = torch.sigmoid(img)
-        if self.refiner is not None:
-            depth = self.refiner(depth, img)
-        depth = torch.sigmoid(depth)
+        img = est[:, :-1] if self._image else utils.linear_to_srgb(capt_img)
+        depth = est[:, [-1]] if self._depth else torch.zeros(b, 1, h, w)
         return ReconstructionOutput(img, depth)
 
-    @property
-    def depth_refined(self):
-        return self.refiner is not None
-
-    @property
-    def bulk_training(self):
-        return self.__bulk_training
-
-    @bulk_training.setter
-    def bulk_training(self, value):
-        if self.__bulk_training == value:
-            return
-
-        utils.change_training(self.__decoder, value)
-        self.__bulk_training = value
+    @classmethod
+    def construct(cls, recipe):
+        return cls(**recipe)

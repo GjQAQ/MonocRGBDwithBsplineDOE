@@ -15,8 +15,12 @@ def compatible_load(ckpt_path: str):
 
     hparams['initialization_type'] = 'default'
 
-    # if hparams.get('base_ckpt', None) is not None:
-    #     hparams['init_optics'] = hparams['base_ckpt']
-    #     hparams['init_cnn'] = hparams['base_ckpt']
-
     return ckpt, hparams
+
+
+def load_decoder_dict(ckpt):
+    return {
+        key[8:]: value
+        for key, value in ckpt['state_dict'].items()
+        if key.startswith('decoder.')
+    }
