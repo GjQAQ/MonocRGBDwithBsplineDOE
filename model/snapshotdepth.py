@@ -51,7 +51,7 @@ class SnapshotDepth(pl.LightningModule):
             'mse_depthmap': regression.MeanSquaredError(),
             'mae_image': regression.MeanAbsoluteError(),
             'mse_image': regression.MeanSquaredError(),
-            'vgg_image': regression.MeanSquaredError(),  # todo: as is original, fix this
+            'vgg_image': Vgg16PerceptualLoss(),
         }
         self.__loss_weights = [
             hparams.depth_loss_weight,
@@ -104,16 +104,15 @@ class SnapshotDepth(pl.LightningModule):
         using_native_amp: bool = False,
         using_lbfgs: bool = False,
     ) -> None:
+        hp = self.hparams
         # warm up lr
         if self.trainer.global_step < 4000:
             lr_scale = float(self.trainer.global_step + 1) / 4000.
-            optimizer.param_groups[0]['lr'] = lr_scale * self.hparams.optics_lr
-            optimizer.param_groups[1]['lr'] = lr_scale * self.hparams.cnn_lr
+            optimizer.param_groups[0]['lr'] = lr_scale * hp.optics_lr
+            optimizer.param_groups[1]['lr'] = lr_scale * hp.cnn_lr
 
-        # if epoch >= 15 and epoch % 5 == 0:
-        #     t = ((epoch - 15) // 5) + 1
-        #     optimizer.param_groups[0]['lr'] = self.hparams.optics_lr * 0.8 ** t
-        #     optimizer.param_groups[1]['lr'] = self.hparams.cnn_lr * 0.5 ** t
+        if epoch >= hp.lr_decay_since and (epoch - hp.lr_decay_since) % hp.lr_decay_every == 0 and batch_idx == 0:
+            optimizer.param_groups[1]['lr'] *= hp.lr_decay_factor
 
         optimizer.step()
         optimizer.zero_grad()
@@ -177,7 +176,7 @@ class SnapshotDepth(pl.LightningModule):
     def validation_epoch_end(self, outputs):
         val_loss = self.__combine_loss(
             self.__metrics['mae_depthmap'].compute(),
-            self.__metrics['vgg_image'].compute(),
+            self.__metrics['mae_image'].compute(),
             0.,
             0.
         )
@@ -228,8 +227,10 @@ class SnapshotDepth(pl.LightningModule):
         )
 
         # Feed the cropped images to CNN
-        model_outputs = self.decoder(captimgs, pinv_volumes, utils.crop_boundary(depthmap, self.crop_width))  # todo
-        # model_outputs = self.decoder(captimgs, pinv_volumes)
+        if self.training and self.hparams.depth_forcing:
+            model_outputs = self.decoder(captimgs, pinv_volumes, utils.crop_boundary(depthmap, self.crop_width))
+        else:
+            model_outputs = self.decoder(captimgs, pinv_volumes)
 
         # Require twice cropping because the image formation also crops the boundary.
         target_images = utils.crop_boundary(img, 2 * self.crop_width)

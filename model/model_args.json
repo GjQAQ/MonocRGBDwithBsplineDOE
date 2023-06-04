@@ -7,9 +7,12 @@
 
   "cnn_lr": {"type": "float", "default": 1e-3},
   "optics_lr": {"type": "float", "default": 1e-9},
+  "lr_decay_since": {"type": "int", "default": 40},
+  "lr_decay_every": {"type": "int", "default": 20},
+  "lr_decay_factor": {"type": "float", "default": 0.1},
   "batch_sz": {"type": "int", "default": 1},
   "depth_loss_weight": {"type": "float", "default": 1},
-  "image_loss_weight": {"type": "float", "default": 1},
+  "image_loss_weight": {"type": "float", "default": 0.1},
   "psf_expansion_loss_weight": {"type": "float", "default": 1},
   "mtf_loss_weight": {"type": "float", "default": 1},
   "randcrop": {"default": false, "action": "store_true"},
@@ -55,6 +58,7 @@
     "optimize_optics": false,
     "log_misc": false,
     "double_precision": false,
+    "depth_forcing": false,
     "psfjitter": {
       "dest": "psf_jitter",
       "default": true
