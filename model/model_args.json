@@ -8,7 +8,7 @@
   "cnn_lr": {"type": "float", "default": 1e-3},
   "optics_lr": {"type": "float", "default": 1e-9},
   "lr_decay_since": {"type": "int", "default": 40},
-  "lr_decay_every": {"type": "int", "default": 20},
+  "lr_decay_every": {"type": "int", "default": 10},
   "lr_decay_factor": {"type": "float", "default": 0.1},
   "batch_sz": {"type": "int", "default": 1},
   "depth_loss_weight": {"type": "float", "default": 1},

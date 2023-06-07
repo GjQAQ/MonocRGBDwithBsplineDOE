@@ -51,7 +51,7 @@ class SnapshotDepth(pl.LightningModule):
             'mse_depthmap': regression.MeanSquaredError(),
             'mae_image': regression.MeanAbsoluteError(),
             'mse_image': regression.MeanSquaredError(),
-            'vgg_image': Vgg16PerceptualLoss(),
+            'vgg_image': regression.MeanAbsoluteError(),
         }
         self.__loss_weights = [
             hparams.depth_loss_weight,
@@ -176,7 +176,7 @@ class SnapshotDepth(pl.LightningModule):
     def validation_epoch_end(self, outputs):
         val_loss = self.__combine_loss(
             self.__metrics['mae_depthmap'].compute(),
-            self.__metrics['mae_image'].compute(),
+            self.__metrics['vgg_image'].compute(),
             0.,
             0.
         )
@@ -330,14 +330,15 @@ class SnapshotDepth(pl.LightningModule):
         grid_summary = torchvision.utils.make_grid(summary, nrow=5)
         res[f'{tag}/summary'] = grid_summary
 
+        # log in square root scale rather than linear scale
         if log_psf:
             psf = self.camera.psf_log([self.hparams.psf_size] * 2, self.hparams.summary_depth_every)
-            res['optics/psf'] = psf[0]
-            res['optics/psf_stretched'] = psf[1]
+            res['optics/psf'] = torch.sqrt(psf[0])
+            res['optics/psf_stretched'] = torch.sqrt(psf[1])
             res['optics/heightmap'] = self.camera.heightmap_log([self.hparams.summary_mask_sz] * 2)
 
         if log_mtf:
-            res['optics/mtf'] = self.camera.mtf_log(self.hparams.summary_depth_every)
+            res['optics/mtf'] = torch.sqrt(self.camera.mtf_log(self.hparams.summary_depth_every))
 
         return res
 

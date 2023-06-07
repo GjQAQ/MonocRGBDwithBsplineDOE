@@ -24,7 +24,7 @@ import utils
 
 __sf: Any = None
 __dp: Any = None
-__floatfmt = '.3g'
+__floatfmt = '.4g'
 __greater_better = ('img_psnr', 'img_ssim')
 __metrics = {
     'img_mae': lambda est, target: functional.l1_loss(est, target).item(),

@@ -233,19 +233,31 @@ def plot_metrics_rel(data_path: str, m1: str, m2: str, label: str, saving_path: 
     __save_or_show(fig, saving_path, label + '.png')
 
 
-def plot_profile(camera, label: str, size=(512, 512), saving_path: str = None):
+def plot_profile(camera, label: str, size=(512, 512), mode='2d', saving_path: str = None):
     """
     Plot the height profile of a DOE.
     :param camera:
     :param label:
     :param size:
+    :param mode:
     :param saving_path:
     :return:
     """
-    profile = camera.heightmap_log(size)
+    profile = camera.heightmap_log(size).squeeze()
 
-    fig, ax = __compact_layout(size)
-    ax.imshow(profile.squeeze(), cmap='gray')
+    if mode == '2d':
+        fig, ax = __compact_layout(size)
+        ax.imshow(profile, cmap='gray')
+    elif mode == '3d':
+        fig, ax = plt.subplots(subplot_kw={'projection': '3d'})
+        a = camera.aperture_diameter
+        n = profile.shape[0]
+        x = np.linspace(-a / 2, a / 2, n)
+        x, y = np.meshgrid(x, x)
+
+        surf = ax.plot_surface(x, y, profile, cmap='coolwarm', linewidth=0, antialiased=False)
+        ax.set_zlim((0, 5))
+        fig.colorbar(surf)
 
     __save_or_show(fig, saving_path, label + '.png')
 

@@ -20,8 +20,10 @@ class Vgg16PerceptualLoss(metrics.Metric):
 
         self.__weight = [11.17 / 35.04 / 4, 35.04 / 35.04 / 4, 29.09 / 35.04 / 4]
         self.__loss = None
-        self.__diff = None
-        self.__total = None
+        # self.diff = None
+        # self.total = None
+        # self.mean = None
+        # self.std = None
 
         self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).reshape(1, 3, 1, 1))
         self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).reshape(1, 3, 1, 1))
@@ -45,7 +47,7 @@ class Vgg16PerceptualLoss(metrics.Metric):
         )
 
     def compute(self) -> torch.Tensor:
-        return sum(map(lambda i: self.__diff[i] / self.__total[i], range(4)))
+        return sum(map(lambda i: self.diff[i] / self.total[i], range(4)))
 
     def __common_action(self, input_, target, init_callback, loop_callback):
         input_ = (input_ - self.mean) / self.std
@@ -65,9 +67,9 @@ class Vgg16PerceptualLoss(metrics.Metric):
         self.__loss += self.__weight[i] * functional.l1_loss(input_[..., 4:-4, 4:-4], target[..., 4:-4, 4:-4])
 
     def __update_init(self, input_, target):
-        self.__diff[0] += (input_ - target).sum() / 4
-        self.__total[0] += input_.numel()
+        self.diff[0] += (input_ - target).sum() / 4
+        self.total[0] += input_.numel()
 
     def __update_loop(self, input_, target, i):
-        self.__diff[i + 1] += self.__weight[i] * (input_[..., 4:-4, 4:-4] - target[..., 4:-4, 4:-4]).sum()
-        self.__total[i + 1] += input_[..., 4:-4, 4:-4].numel()
+        self.diff[i + 1] += self.__weight[i] * (input_[..., 4:-4, 4:-4] - target[..., 4:-4, 4:-4]).sum()
+        self.total[i + 1] += input_[..., 4:-4, 4:-4].numel()
