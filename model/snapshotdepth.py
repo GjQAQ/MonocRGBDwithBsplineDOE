@@ -174,8 +174,11 @@ class SnapshotDepth(pl.LightningModule):
             metric.to(self.device)
 
     def validation_epoch_end(self, outputs):
+        de = getattr(self.decoder, 'depth_estimator', None)
+        eval_d = de.training if de is not None else True
+
         val_loss = self.__combine_loss(
-            self.__metrics['mae_depthmap'].compute(),
+            self.__metrics['mae_depthmap'].compute() if eval_d else 0,
             self.__metrics['vgg_image'].compute(),
             0.,
             0.

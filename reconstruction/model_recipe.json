@@ -4,9 +4,17 @@
   },
   "depth-guided": {
     "depth_estimator_type": "plain",
-    "ckpt_path": "log/ls/version_1/model-v2.ckpt",
-    "unet_path": "log/ls/version_1/model-v2.ckpt",
+    "ckpt_path": "log/ls/version_1/model*.ckpt",
+    "unet_path": "log/ls/version_1/model*.ckpt",
     "train_depth": false,
     "train_image": true
+  },
+  "restormer": {
+    "depth_estimator_type": "plain",
+    "ckpt_path": "log/ls/version_1/model*.ckpt",
+    "pre-trained": "single_image_defocus_deblurring.pth",
+    "train_depth": false,
+    "train_image": true,
+    "restormer_args": {}
   }
 }
