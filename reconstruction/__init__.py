@@ -1,7 +1,5 @@
-from .reconstructor import *
-from .depthguided import *
+from .unet_est import *
 from .restormer import *
 
-register_model('plain', Reconstructor)
-register_model('depth-guided', DepthGuided)
-register_model('restormer', RestormerBased)
+register_model('plain', UNetBased)
+register_model('restormer', RestormerAlt)

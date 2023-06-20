@@ -49,7 +49,7 @@ class RotationallySymmetricCamera(optics.base.Camera):
 
         init_heightmap1d = torch.zeros(aperture_size // 2 // aperture_upsample_factor)
 
-        self.__heightmap1d = torch.nn.Parameter(init_heightmap1d, requires_grad=requires_grad)
+        self.height_profile = torch.nn.Parameter(init_heightmap1d, requires_grad=requires_grad)
         self.__aperture_upsample_factor = aperture_upsample_factor
         self.__full_size = self.regularize_image_size(full_size)
         self.__aperture_size = aperture_size
@@ -117,31 +117,11 @@ class RotationallySymmetricCamera(optics.base.Camera):
         phase = optics.heightmap2phase(h, wavelength, optics.refractive_index(wavelength))
         return self.apply_stop(fft.exp2xy(1, phase), r2=torch.stack([r2, r2], -1))
 
-    def feature_parameters(self):
-        return {'heightmap1d': self.__heightmap1d.data}
-
-    @classmethod
-    def extract_parameters(cls, hparams, **kwargs) -> typing.Dict:
-        init_type = hparams.initialization_type
-        if init_type != 'default':
-            raise ValueError(f'Unsupported initialization type: {hparams.initialization_type}')
-
-        base = super().extract_parameters(hparams, **kwargs)
-        base.update({
-            'full_size': hparams.full_size,
-            'aperture_upsample_factor': hparams.mask_upsample_factor,
-            'aperture_size': hparams.mask_sz,
-        })
-        return base
-
     def specific_log(self, *args, **kwargs):
         log = super().specific_log(*args, **kwargs)
         log['optics/heightmap_max'] = self.heightmap1d.max()
         log['optics/heightmap_min'] = self.heightmap1d.min()
         return log
-
-    def load_state_dict(self, state_dict: Union[Dict[str, Tensor], Dict[str, Tensor]], strict: bool = True):
-        self.__heightmap1d.data = state_dict['heightmap1d']
 
     @property
     def aperture_pitch(self):
@@ -150,14 +130,40 @@ class RotationallySymmetricCamera(optics.base.Camera):
     @property
     def heightmap1d(self):
         return functional.interpolate(
-            self.__heightmap1d.reshape(1, 1, -1),
+            self.height_profile.reshape(1, 1, -1),
             scale_factor=self.__aperture_upsample_factor,
             mode='nearest'
         ).reshape(-1)
 
     @property
     def original_heightmap1d(self):
-        return self.__heightmap1d
+        return self.height_profile
+
+    @classmethod
+    def extract_parameters(cls, **kwargs) -> typing.Dict:
+        init_type = kwargs['initialization_type']
+        if init_type != 'default':
+            raise ValueError(f'Unsupported initialization type: {kwargs["initialization_type"]}')
+
+        base = super().extract_parameters(**kwargs)
+        base.update({
+            'full_size': kwargs['full_size'],
+            'aperture_upsample_factor': kwargs['mask_upsample_factor'],
+            'aperture_size': kwargs['mask_sz'],
+        })
+        return base
+
+    @classmethod
+    def add_specific_args(cls, parser):
+        base = super().add_specific_args(parser)
+        base.add_argument(
+            '--mask_sz', type=int, default=8000,
+            help='Number of axial sample points'
+        )
+        base.add_argument(
+            '--full_size', type=int, default=1920,
+            help=''
+        )
 
     def __build_camera(self):
         h, rho_grid, rho_sampling = self.__precompute_h(self._image_size)
@@ -177,12 +183,12 @@ class RotationallySymmetricCamera(optics.base.Camera):
                 rho_sampling.reshape(self.n_wavelengths, -1).min(dim=-1)[0]
             ))
 
-        self.register_buffer('buf_h', h)
-        self.register_buffer('buf_rho_grid', rho_grid)
-        self.register_buffer('buf_rho_sampling', rho_sampling)
-        self.register_buffer('buf_ind', ind)
-        self.register_buffer('buf_h_full', h_full)
-        self.register_buffer('buf_rho_grid_full', rho_grid_full)
+        self.register_buffer('buf_h', h, persistent=False)
+        self.register_buffer('buf_rho_grid', rho_grid, persistent=False)
+        self.register_buffer('buf_rho_sampling', rho_sampling, persistent=False)
+        self.register_buffer('buf_ind', ind, persistent=False)
+        self.register_buffer('buf_h_full', h_full, persistent=False)
+        self.register_buffer('buf_rho_grid_full', rho_grid_full, persistent=False)
         # These two parameters are not used for training.
         self.__rho_sampling_full = rho_sampling_full
         self.__ind_full = ind_full

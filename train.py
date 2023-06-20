@@ -13,8 +13,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from dataset.dualpixel import DualPixel
-from dataset.sceneflow import SceneFlow
+from dataset import *
 from model.snapshotdepth import SnapshotDepth
 from utils.log import LogManager
 
@@ -33,6 +32,7 @@ def prepare_data(hparams):
 
     sceneflow = functools.partial(
         SceneFlow,
+        # PreCodedSceneFlow,
         '/home/ps/Data/Guojiaqi/dataset/sceneflow',
         'train',
         (image_sz + 4 * crop_width, image_sz + 4 * crop_width),
@@ -110,7 +110,9 @@ def main(args):
 
 if __name__ == '__main__':
     mp.set_start_method('spawn')  # bug fix
-    parser = argparse.ArgumentParser(add_help=False)
+    parser = argparse.ArgumentParser(
+        usage='python %(prog)s camera_type estimator_type [options]'
+    )
 
     parser.add_argument('--experiment_name', type=str, default='ExtendedDOF')
     parser.add_argument('--mix_dualpixel_dataset', dest='mix_dualpixel_dataset', action='store_true')
@@ -118,7 +120,7 @@ if __name__ == '__main__':
     parser.add_argument('--save_top', type=int, default=5)
 
     parser = pl.Trainer.add_argparse_args(parser)
-    parser = SnapshotDepth.add_model_specific_args(parser, os.path.join('model', 'model_args.json'))
+    parser = SnapshotDepth.add_model_specific_args(parser)
 
     parser.set_defaults(
         gpus=1,

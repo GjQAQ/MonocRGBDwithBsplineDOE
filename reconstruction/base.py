@@ -1,36 +1,27 @@
 import abc
 import collections
-import json
-import os.path
+import typing
 
-import torch
 from torch import nn
-import numpy as np
 
 CH_DEPTH = 1
 CH_RGB = 3
 ReconstructionOutput = collections.namedtuple('ReconstructionOutput', ['est_img', 'est_depthmap'])
 
-__model_dir = {}
-__dirname = os.path.dirname(os.path.abspath(__file__))
-with open(os.path.join(__dirname, 'model_recipe.json')) as f:
-    __recipe = json.load(f)
+model_dir = {}
 
 
 def register_model(name, cls):
-    __model_dir[name] = cls
+    model_dir[name] = cls
 
 
 def get_model(name):
-    return __model_dir[name]
+    return model_dir[name]
 
 
-def get_recipe(name):
-    return __recipe[name]
-
-
-def construct_model(name):
-    return get_model(name).construct(get_recipe(name))
+def construct_model(name, args):
+    model_type = get_model(name)
+    return model_type(**model_type.extract_parameters(args))
 
 
 class EstimatorBase(nn.Module):
@@ -53,11 +44,6 @@ class EstimatorBase(nn.Module):
     def forward(self, capt_img, pin_volume) -> ReconstructionOutput:
         pass
 
-    @classmethod
-    @abc.abstractmethod
-    def construct(cls, recipe):
-        pass
-
     @property
     def estimating_depth(self) -> bool:
         return self._depth
@@ -65,6 +51,19 @@ class EstimatorBase(nn.Module):
     @property
     def estimating_image(self) -> bool:
         return self._image
+
+    @classmethod
+    def extract_parameters(cls, kwargs) -> typing.Dict:
+        """
+        Collect instantiation paramters from a dict.
+        :param kwargs: Input dict
+        :return: Parameters dict which contains just all parameters needed for estimator instantiation
+        """
+        return {}
+
+    @classmethod
+    def add_specific_args(cls, parser):
+        return parser
 
 
 class DepthOnlyWrapper(nn.Module):

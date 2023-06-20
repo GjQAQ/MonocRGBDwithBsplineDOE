@@ -4,6 +4,7 @@ from typing import List
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 import torchvision.utils
 
 import algorithm
@@ -45,11 +46,12 @@ def __plot_featmaps(prefix, img):
     pass  # todo
 
 
-def __compact_layout(size):
+def __compact_layout(size, adjust=True):
     dpi = plt.rcParams['figure.dpi']
     fig, ax = plt.subplots(figsize=(size[0] / dpi, size[1] / dpi))
     ax.set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
-    fig.subplots_adjust(left=0, bottom=0, right=1, top=1)
+    if adjust:
+        fig.subplots_adjust(left=0, bottom=0, right=1, top=1)
     return fig, ax
 
 
@@ -61,10 +63,21 @@ def __save_or_show(fig, path, filename):
         fig.savefig(os.path.join(path, filename))
 
 
+def __plot_diff(diff, vmin, vmax, permute=False):
+    h, w = diff.shape[-2:]
+    if permute:
+        diff = diff.permute(1, 2, 0)
+    fig, ax = __compact_layout((w, h), False)
+    aximg = ax.imshow(diff, vmin=vmin, vmax=vmax)
+    fig.colorbar(aximg, location='bottom', orientation='horizontal')
+    fig.show()
+
+
 def inspect_samples(
     index: int,
     ckpt_path: str,
     labels: str,
+    show_diff=False,
     saving_path: str = None,
     color=(0, 0, 0),
     image_size=512,
@@ -76,6 +89,7 @@ def inspect_samples(
     :param index: The index of sample.
     :param ckpt_path: The path of checkpoint to be inspected.
     :param labels: A name to specify the model.
+    :param show_diff: Whether to show the difference between prediction and GT as well.
     :param saving_path: Path where resulted figure will be saved. Displaying figure if None specified.
     :param color: Font color.
     :param image_size:
@@ -113,8 +127,13 @@ def inspect_samples(
             color=color,
             fontsize=h // 16
         )
-
         __save_or_show(fig, saving_path, f'{index}-{tag[i]}.png')
+
+    if show_diff:
+        img_diff = torch.abs(imgs.est_img - imgs.target_img)
+        depth_diff = torch.abs(imgs.est_depthmap - imgs.target_depthmap)
+        __plot_diff(img_diff.squeeze(), 0, 0.1, True)
+        __plot_diff(depth_diff.squeeze(), 0, 0.5)
 
 
 def plot_spectrum(spectrum, label: str, saving_path=None, **kwargs):

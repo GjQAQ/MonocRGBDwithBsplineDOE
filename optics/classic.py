@@ -29,9 +29,9 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
         self.__scale_factor = int(torch.ceil(
             const * self.aperture_diameter / torch.min(self.buf_wavelengths)
         ).item() + 1e-5)
-        self.register_buffer('buf_u_axis', self.__uv_grid(1))
-        self.register_buffer('buf_v_axis', self.__uv_grid(0))
-        self.register_buffer('buf_r_sqr', self.u_axis ** 2 + self.v_axis ** 2)
+        self.register_buffer('buf_u_axis', self.__uv_grid(1), persistent=False)
+        self.register_buffer('buf_v_axis', self.__uv_grid(0), persistent=False)
+        self.register_buffer('buf_r_sqr', self.u_axis ** 2 + self.v_axis ** 2, persistent=False)
 
         self.__heightmap_history = None
 
@@ -125,12 +125,19 @@ class ClassicCamera(optics.Camera, metaclass=abc.ABCMeta):
         return sample_range * self.__psf_factor / torch.tensor([self._image_size], device=self.device)
 
     @classmethod
-    def extract_parameters(cls, hparams, **kwargs) -> typing.Dict:
-        base = super().extract_parameters(hparams, **kwargs)
+    def extract_parameters(cls, kwargs) -> typing.Dict:
+        base = super().extract_parameters(kwargs)
         base.update({
-            'double_precision': hparams.double_precision,
-            'effective_psf_factor': hparams.effective_psf_factor
+            'double_precision': kwargs['double_precision'],
+            'effective_psf_factor': kwargs['effective_psf_factor']
         })
+        return base
+
+    @classmethod
+    def add_specific_args(cls, parser):
+        base = super().add_specific_args(parser)
+        base.add_argument('--effective_psf_factor', type=int, default=1, help='')
+        utils.add_switch(base, 'double_precision', True, 'Whether or not to compute PSF in double precision')
         return base
 
     @torch.no_grad()

@@ -1,14 +1,36 @@
 import abc
 import typing
+import argparse
 
 import numpy as np
 import torch
 import torchvision.utils
 from torch import nn as nn
+import debayer
 
 import algorithm.image
 import utils
 from utils import fft as fft, old_complex as old_complex
+
+
+camera_dir = {}
+aperture_types = ('circular', 'square')
+
+
+def register_camera(name, cls):
+    camera_dir[name] = cls
+
+
+def get_camera(name):
+    if name in camera_dir:
+        return camera_dir[name]
+    else:
+        raise ValueError(f'Unknown camera type: {name}')
+
+
+def construct_camera(name, params):
+    ct = get_camera(name)
+    return ct(**ct.extract_parameters(params))
 
 
 def heightmap2phase(height, wavelength, refractive_index):
@@ -59,6 +81,9 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
         diffraction_efficiency=0.7,
         loss_items: typing.Tuple[str] = (),
         aperture_type='circular',
+        occlusion=True,
+        bayer=True,
+        noise_sigma=(1e-3, 5e-3)
     ):
         super().__init__()
         self.__applying_stop = {
@@ -74,6 +99,8 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
             torch.linspace(0, 1, steps=n_depths), min_depth, max_depth
         )
 
+        self.debayer = debayer.Debayer3x3()
+
         self._diffraction_efficiency = diffraction_efficiency
         self._n_depths = n_depths
         self.__min_depth = min_depth
@@ -85,16 +112,19 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
         self._image_size = self.regularize_image_size(image_size)
         self.__loss_items = loss_items
         self.__aperture_type = aperture_type
+        self.__occlusion = occlusion
+        self.__bayer = bayer
+        self.__noise_sigma = noise_sigma
 
         self.__register_wavlength(wavelengths)
-        self.register_buffer('buf_scene_distances', scene_distances)
+        self.register_buffer('buf_scene_distances', scene_distances, persistent=False)
 
         if 'mtf' in loss_items:
             s = self.slope_range
             fy = torch.linspace(-0.5, 0.5, self._image_size[-2]).reshape(-1, 1) / self.camera_pitch
             fx = torch.linspace(-0.5, 0.5, self._image_size[-1]).reshape(1, -1) / self.camera_pitch
             mtf_bound = self.aperture_diameter ** 3 / (s * torch.sqrt(fx ** 2 + fy ** 2))
-            self.register_buffer('buf_mtf_bound', mtf_bound)
+            self.register_buffer('buf_mtf_bound', mtf_bound, persistent=False)
         else:
             self.mtf_loss = lambda *args, **kwargs: 0
         if 'psf_expansion' not in loss_items:
@@ -119,29 +149,6 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
     def aberration(self, u, v, wavelength=None) -> torch.Tensor:
         pass
 
-    @abc.abstractmethod
-    def feature_parameters(self) -> typing.Dict:
-        pass
-
-    @classmethod
-    def extract_parameters(cls, hparams, **kwargs) -> typing.Dict:
-        return {
-            'wavelengths': (632e-9, 550e-9, 450e-9),
-            'min_depth': hparams.min_depth,
-            'max_depth': hparams.max_depth,
-            'focal_depth': hparams.focal_depth,
-            'n_depths': hparams.n_depths,
-            'image_size': hparams.image_sz + 4 * hparams.crop_width,
-            'camera_pitch': hparams.camera_pixel_pitch,
-            'focal_length': hparams.focal_length,
-            'aperture_diameter': hparams.focal_length / hparams.f_number,
-            'diffraction_efficiency': hparams.diffraction_efficiency,
-            'requires_grad': hparams.optimize_optics,
-            'loss_items': hparams.loss_items or (),
-            'init_type': hparams.initialization_type,
-            'aperture_type': hparams.aperture_type
-        }
-
     def extra_repr(self):
         return f'''
 Camera module...
@@ -151,11 +158,29 @@ Depths: {list(map(lambda x: f'{x:.3f}', self.buf_scene_distances.numpy().tolist(
 Input image size: {self._image_size}
               '''
 
-    def forward(self, img, depthmap, occlusion, is_training=False):
-        psf = self.psf_at_camera(img.shape[-2:], is_training=is_training).unsqueeze(0)
+    def forward(self, img, depthmap, noise=True):
+        psf = self.psf_at_camera(img.shape[-2:], is_training=self.training).unsqueeze(0)
         psf = self.normalize(psf)
-        captimg, volume = self.get_capt_img(img, depthmap, psf, occlusion)
+        captimg, volume = self.get_capt_img(img, depthmap, psf, self.__occlusion)
+        if noise:
+            captimg = self.apply_noise(captimg)
         return captimg, volume, psf
+
+    def apply_noise(self, img):
+        dtype = img.dtype
+        device = img.device
+        n_min, n_max = self.__noise_sigma
+        noise_sigma = (n_max - n_min) * torch.rand((img.shape[0], 1, 1, 1), device=device, dtype=dtype) + n_min
+
+        if not self.__bayer:
+            img = img + noise_sigma * torch.randn(img.shape, device=device, dtype=dtype)
+        else:
+            captimgs_bayer = utils.to_bayer(img)
+            captimgs_bayer = captimgs_bayer + noise_sigma * torch.randn(
+                captimgs_bayer.shape, device=device, dtype=dtype
+            )
+            img = self.debayer(captimgs_bayer)
+        return img
 
     def get_capt_img(self, img, depthmap, psf, occlusion):
         with torch.no_grad():
@@ -329,6 +354,77 @@ Input image size: {self._image_size}
     def aperture_type(self):
         return self.__aperture_type
 
+    @classmethod
+    def add_specific_args(cls, parser):
+        parser = argparse.ArgumentParser(parents=[parser], add_help=False)
+
+        # physics arguments
+        parser.add_argument('--min_depth', type=float, default=1, help='Minimum depth in metre')
+        parser.add_argument('--max_depth', type=float, default=5, help='Maximum depth in metre')
+        parser.add_argument('--focal_depth', type=float, default=1.7, help='Focal depth in metre')
+        parser.add_argument('--focal_length', type=float, default=50e-3, help='Focal length in metre')
+        parser.add_argument('--f_number', type=float, default=6.3, help='F number')
+        parser.add_argument(
+            '--camera_pixel_pitch', type=float, default=6.45e-6,
+            help='Width of a sensor element in metre'
+        )
+        parser.add_argument(
+            '--noise_sigma_min', type=float, default=1e-3,
+            help='Minimum standard deviation of Gaussian noise'
+        )
+        parser.add_argument(
+            '--noise_sigma_max', type=float, default=5e-3,
+            help='Maximum standard deviation of Gaussian noise'
+        )
+        parser.add_argument('--diffraction_efficiency', type=float, default=0.7, help='Diffraction efficiency')
+
+        # type option
+        parser.add_argument(
+            '--aperture_type', type=str, default='circular',
+            help=f'Type of aperture shape',
+            choices=aperture_types
+        )
+        parser.add_argument(
+            '--initialization_type', type=str, default='default',
+            help='How to initialize DOE profile'
+        )
+
+        # image arguments
+        parser.add_argument('--psf_size', type=int, default=64, help='Size of PSF image for log')
+        parser.add_argument('--image_sz', type=int, default=256, help='Final size of processed images')
+        parser.add_argument('--n_depths', type=int, default=16, help='Number of depth layers')
+        parser.add_argument('--crop_width', type=int, default=32, help='Width of margin to be cropped')
+
+        # switches
+        utils.add_switch(parser, 'bayer', True, 'Whether or not to use bayer format')
+        utils.add_switch(parser, 'occlusion', True, 'Whether or not to use non-linear image formation model')
+        utils.add_switch(parser, 'optimize_optics', True, 'Whether or not to optimize DOE')
+        return parser
+
+    @classmethod
+    def extract_parameters(cls, kwargs) -> typing.Dict:
+        """
+        Collect instantiation paramters from a dict.
+        :param kwargs: Input dict
+        :return: Parameters dict which contains just all parameters needed for camera instantiation
+        """
+        params = {
+            'wavelengths': (632e-9, 550e-9, 450e-9),
+            'image_size': kwargs['image_sz'] + 4 * kwargs['crop_width'],
+            'camera_pitch': kwargs['camera_pixel_pitch'],
+            'aperture_diameter': kwargs['focal_length'] / kwargs['f_number'],
+            'requires_grad': kwargs['optimize_optics'],
+            'loss_items': kwargs['loss_items'] or (),
+            'init_type': kwargs['initialization_type'],
+            'noise_sigma': (kwargs['noise_sigma_min'], kwargs['noise_sigma_max'])
+        }
+        for k in (
+            'min_depth', 'max_depth', 'focal_depth', 'n_depths', 'focal_length',
+            'diffraction_efficiency', 'aperture_type', 'occlusion', 'bayer'
+        ):
+            params[k] = kwargs[k]
+        return params
+
     def _scale_coordinate(self, x):
         x = x / self.aperture_diameter + 0.5
         return torch.clamp(x, 0, 1)
@@ -345,14 +441,14 @@ Input image size: {self._image_size}
             raise ValueError('the number of wavelengths has to be a multiple of 3.')
 
         if not hasattr(self, 'buf_wavelengths'):
-            self.register_buffer('buf_wavelengths', wavelengths)
+            self.register_buffer('buf_wavelengths', wavelengths, persistent=False)
         else:
             self.buf_wavelengths = wavelengths.to(self.buf_wavelengths.device)
 
     @torch.no_grad()
     def __undiffracted_psf(self):
         if not hasattr(self, 'buf_undiffracted_psf'):
-            self.register_buffer('buf_undiffracted_psf', self.psf(self.buf_scene_distances, False))
+            self.register_buffer('buf_undiffracted_psf', self.psf(self.buf_scene_distances, False), persistent=False)
             self.buf_undiffracted_psf /= self.buf_undiffracted_psf.sum(dim=(-1, -2), keepdim=True)
         return self.buf_undiffracted_psf
 

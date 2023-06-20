@@ -215,7 +215,7 @@ class Upsample(nn.Module):
 class Restormer(nn.Module):
     def __init__(self,
                  inp_channels=3,
-                 out_channels=3,
+                 out_channels=4,  # modified, RGBD
                  dim=48,
                  num_blocks=(4, 6, 6, 8),
                  num_refinement_blocks=4,
@@ -332,68 +332,24 @@ class Restormer(nn.Module):
 
         out_dec_level1 = self.refinement(out_dec_level1)
 
-        out_dec_level1 = self.output(out_dec_level1) + inp_img
+        out_dec_level1 = self.output(out_dec_level1)
+        out_dec_level1[:, :3] += inp_img
+        out_dec_level1[:, [3]] = torch.sigmoid(out_dec_level1[:, [3]])
 
         return out_dec_level1
 
 
-class RestormerBased(EstimatorBase):
-    def __init__(
-        self,
-        depth_estimator,
-        train_depth=True,
-        train_image=True,
-        init_depth=True,
-        **kwargs
-    ):
+class RestormerAlt(EstimatorBase):
+    def __init__(self, **kwargs):
         super().__init__()
         self._depth = True
         self._image = True
 
         self.restormer = Restormer(**kwargs)
-        self.depth_estimator = depth_estimator
-
-        self.__train_depth = train_depth
-        self.__train_image = train_image
-        self.depth_estimator.train(train_depth)
-        self.restormer.train(train_image)
-
-        utils.init_module(self.restormer)
-        if init_depth:
-            utils.init_module(self.depth_estimator)
-        if not train_depth:
-            utils.freeze_norm(self.depth_estimator)
 
     def forward(self, capt_img, pin_volume) -> ReconstructionOutput:
+        pred = self.restormer(capt_img)
         return ReconstructionOutput(
-            self.restormer(capt_img),
-            self.depth_estimator(capt_img, pin_volume).est_depthmap
+            utils.linear_to_srgb(pred[:, :3]),
+            pred[:, [3]]
         )
-
-    @classmethod
-    def construct(cls, recipe):
-        de_type = recipe['depth_estimator_type']
-        inst = cls(
-            construct_model(de_type),
-            recipe['train_depth'],
-            recipe['train_image'],
-            not recipe['ckpt_path'],
-            **recipe['restormer_args']
-        )
-
-        try:
-            if recipe['ckpt_path']:
-                ckpt, _ = utils.compatible_load(recipe['ckpt_path'])
-                inst.depth_estimator.load_state_dict(utils.load_decoder_dict(ckpt))
-            if recipe['pre-trained']:
-                inst.restormer.load_state_dict(torch.load(recipe['pre-trained'])['params'])
-        except Exception as e:
-            print(f'Initialization failed:\n{e}')
-        return inst
-
-    def train(self, mode: bool = True):
-        if self.__train_depth:
-            self.depth_estimator.train(mode)
-        if self.__train_image:
-            self.restormer.train(mode)
-        return self

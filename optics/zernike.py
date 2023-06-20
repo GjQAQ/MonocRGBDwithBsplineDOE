@@ -30,12 +30,12 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
         else:
             init = torch.zeros(linear)
         if init is not None:
-            self.__coefficients = torch.nn.Parameter(init, requires_grad=requires_grad)
+            self.zernike_coefficients = torch.nn.Parameter(init, requires_grad=requires_grad)
 
         r = torch.sqrt(self.buf_r_sqr) / (self.aperture_diameter / 2)  # n_wl x N_u x N_v
         r = torch.clamp(r, 0, 1)
         t = torch.atan2(self.v_axis, self.u_axis)
-        self.register_buffer('buf_mat', z.make_matrix(r, t, self.__degree))
+        self.register_buffer('buf_mat', z.make_matrix(r, t, self.__degree), persistent=False)
 
     def psf_out_energy(self, psf_size: int):
         return 0, 0  # todo
@@ -43,7 +43,7 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
     def compute_heightmap(self):
         return z.fit_with_matrix(
             self.buf_mat,
-            self.__coefficients[None, ..., None],
+            self.zernike_coefficients[None, ..., None],
             self.buf_r_sqr.shape[-2:]
         )
 
@@ -67,7 +67,7 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
     def aberration(self, u, v, wavelength=None):
         if wavelength is None:
             wavelength = self.buf_wavelengths[len(self.buf_wavelengths) / 2]
-        c = self.__coefficients.cpu()[None, None, :, None]
+        c = self.zernike_coefficients.cpu()[None, None, :, None]
 
         v = torch.flip(v, (3,))
         r2 = u ** 2 + v ** 2
@@ -86,26 +86,29 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
         v = torch.linspace(-1, 1, size[0])[:, None]
         r = torch.sqrt(u ** 2 + v ** 2)
         t = torch.atan2(v, u)
-        h = z.fit_with_matrix(z.make_matrix(r, t, self.__degree), self.__coefficients.cpu()[:, None])
+        h = z.fit_with_matrix(z.make_matrix(r, t, self.__degree), self.zernike_coefficients.cpu()[:, None])
         h = torch.reshape(h, size)
         h -= h.min()
         h /= h.max()
         return torch.where(torch.tensor(r < 1), h, torch.zeros_like(h)).unsqueeze(0)
 
-    def feature_parameters(self):
-        return {'zernike_coefficients': self.__coefficients.data}
-
-    def load_state_dict(self, state_dict: Union[Dict[str, Tensor], Dict[str, Tensor]], strict: bool = True):
-        self.__coefficients.data = state_dict['zernike_coefficients']
-
     @classmethod
-    def extract_parameters(cls, hparams, **kwargs) -> typing.Dict:
-        it = hparams.initialization_type
+    def extract_parameters(cls, **kwargs) -> typing.Dict:
+        it = kwargs['initialization_type']
         if it not in ('default', 'lattice_focal'):
             raise ValueError(f'Unsupported initialization type: {it}')
 
-        base = super().extract_parameters(hparams, **kwargs)
+        base = super().extract_parameters(**kwargs)
         base.update({
-            'degree': hparams.zernike_degree,
+            'degree': kwargs['zernike_degree'],
         })
+        return base
+
+    @classmethod
+    def add_specific_args(cls, parser):
+        base = super().add_specific_args(parser)
+        base.add_argument(
+            '--zernike_degree', type=int, default=10,
+            help='Number of Zernike coefficients used'
+        )
         return base

@@ -18,9 +18,8 @@ def compatible_load(ckpt_path: str):
     return ckpt, hparams
 
 
-def load_decoder_dict(ckpt):
-    return {
-        key[8:]: value
-        for key, value in ckpt['state_dict'].items()
-        if key.startswith('decoder.')
-    }
+def add_switch(parser, name, default, help_info):
+    parser.add_argument(
+        f'--{name}', type=lambda v: bool(int(v)),
+        nargs='?', const=True, default=default, help=help_info
+    )

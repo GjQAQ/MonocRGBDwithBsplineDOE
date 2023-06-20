@@ -62,11 +62,11 @@ class BSplineApertureCamera(optics.ClassicCamera):
             init = self.lattice_focal_init()
         else:
             init = torch.zeros(grid_size)
-        self.__control_points = torch.nn.Parameter(init, requires_grad=requires_grad)
+        self.control_points = torch.nn.Parameter(init, requires_grad=requires_grad)
 
         # buffered tensors used to compute heightmap in psf
-        self.register_buffer('buf_u_matrix', self.__design_matrix(1))
-        self.register_buffer('buf_v_matrix', self.__design_matrix(0))
+        self.register_buffer('buf_u_matrix', self.__design_matrix(1), persistent=False)
+        self.register_buffer('buf_v_matrix', self.__design_matrix(0), persistent=False)
 
     def psf_out_energy(self, psf_size: int):
         return 0, 0  # todo
@@ -75,7 +75,7 @@ class BSplineApertureCamera(optics.ClassicCamera):
         return self.__heightmap(
             self.buf_u_matrix,
             self.buf_v_matrix,
-            self.__control_points.unsqueeze(0)
+            self.control_points.unsqueeze(0)
         )  # n_wl x N_u x N_v
 
     @torch.no_grad()
@@ -94,7 +94,7 @@ class BSplineApertureCamera(optics.ClassicCamera):
     def aberration(self, u, v, wavelength: float = None):
         if wavelength is None:
             wavelength = self.buf_wavelengths[len(self.buf_wavelengths) / 2]
-        c = self.__control_points.cpu()[None, None, ...]
+        c = self.control_points.cpu()[None, None, ...]
 
         r2 = u ** 2 + v ** 2
         scaled_u = self._scale_coordinate(u).squeeze(-2)  # 1 x omega_x x t1
@@ -121,7 +121,7 @@ class BSplineApertureCamera(optics.ClassicCamera):
             m.append(torch.from_numpy(design_matrix(axis[-1], kv, p)))
 
         u, v = torch.meshgrid(*axis)
-        h = self.__heightmap(*m, self.__control_points.cpu())
+        h = self.__heightmap(*m, self.control_points.cpu())
         u = u - 0.5
         v = v - 0.5
         h = self.apply_stop(h, 0.5, x=u, y=v, r2=u ** 2 + v ** 2).unsqueeze(0)
@@ -129,23 +129,30 @@ class BSplineApertureCamera(optics.ClassicCamera):
         h /= h.max()
         return h
 
-    def feature_parameters(self):
-        return {'control_points': self.__control_points.data}
-
-    def load_state_dict(self, state_dict: Union[Dict[str, Tensor], Dict[str, Tensor]], strict: bool = True):
-        self.__control_points.data = state_dict['control_points']
-
     @classmethod
-    def extract_parameters(cls, hparams, **kwargs) -> typing.Dict:
-        it = hparams.initialization_type
+    def extract_parameters(cls, kwargs) -> typing.Dict:
+        it = kwargs['initialization_type']
         if it not in ('default', 'lattice_focal'):
             raise ValueError(f'Unsupported initialization type: {it}')
 
-        base = super().extract_parameters(hparams, **kwargs)
+        base = super().extract_parameters(kwargs)
         base.update({
-            "degrees": [hparams.bspline_degree] * 2,
-            "grid_size": [hparams.bspline_grid_size] * 2
+            "degrees": [kwargs['bspline_degree']] * 2,
+            "grid_size": [kwargs['bspline_grid_size']] * 2
         })
+        return base
+
+    @classmethod
+    def add_specific_args(cls, parser):
+        base = super().add_specific_args(parser)
+        base.add_argument(
+            '--bspline_grid_size', type=int, default=50,
+            help='Number of control points in each direction for B-spline DOE'
+        )
+        base.add_argument(
+            '--bspline_degree', type=int, default=5,
+            help='Degree of B-spline surface in each directin'
+        )
         return base
 
     @torch.no_grad()

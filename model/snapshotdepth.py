@@ -1,4 +1,4 @@
-import re
+import sys
 import typing
 import collections
 import argparse
@@ -11,7 +11,6 @@ import torch.nn
 import torch.optim as optim
 import torchvision.transforms
 import torchvision.utils
-import debayer
 
 import reconstruction as reco
 from .vgg16loss import Vgg16PerceptualLoss
@@ -21,11 +20,6 @@ import algorithm.inverse as inverse
 import optics
 
 
-optics_models = {
-    'rotationally-symmetric': optics.RotationallySymmetricCamera,
-    'b-spline': optics.BSplineApertureCamera,
-    'zernike': optics.ZernikeApertureCamera
-}
 FinalOutput = collections.namedtuple(
     'FinalOutput',
     ['capt_img', 'capt_linear', 'est_img', 'est_depthmap', 'target_img', 'target_depthmap', 'psf']
@@ -61,28 +55,20 @@ class SnapshotDepth(pl.LightningModule):
         ]
 
         self.log_dir = log_dir
+        self.crop_width = hparams.crop_width
 
-        name = hparams.reconstructor_type
-        # name = 'depth-guided'
-        self.decoder = reco.construct_model(name)
+        self.decoder = reco.construct_model(hparams.estimator_type)
         if hparams.init_cnn:
             ckpt, _ = utils.compatible_load(hparams.init_cnn)
-            self.decoder.load_state_dict(utils.load_decoder_dict(ckpt))
+            self.decoder.load_state_dict(utils.submodule_state_dict('decoder.', ckpt['state_dict']))
 
-        self.debayer = debayer.Debayer3x3()
+        self.camera = optics.construct_camera(hparams.camera_type, hparams)
+        if hparams.init_optics:
+            ckpt, _ = utils.compatible_load(hparams.init_optics)
+            self.camera.load_state_dict(utils.submodule_state_dict('camera.', ckpt['state_dict']))
 
         self.image_lossfn = Vgg16PerceptualLoss()
         self.depth_lossfn = torch.nn.L1Loss()
-
-        self.crop_width = hparams.crop_width
-        if hparams.camera_type in optics_models:
-            camera_class = optics_models[hparams.camera_type]
-            self.camera = camera_class(**camera_class.extract_parameters(hparams))
-        else:
-            raise ValueError(f'Unknown camera type: {hparams.camera_type}')
-        if hparams.init_optics:
-            ckpt, _ = utils.compatible_load(hparams.init_optics)
-            self.camera.load_state_dict(ckpt['state_dict'])
 
         if print_info:
             print(self.camera)
@@ -120,28 +106,8 @@ class SnapshotDepth(pl.LightningModule):
     def training_step(self, data: dataset.ImageItem, batch_idx: int):
         outputs, mask = self.__step_common(data, False)
 
-        # Unpack outputs
-        est_images = outputs.est_img
-        est_depthmaps = outputs.est_depthmap
-        target_images = outputs.target_img
-        target_depthmaps = outputs.target_depthmap
-        captimgs_linear = outputs.capt_linear
-
         data_loss, logs = self.__compute_loss(outputs, mask)
         logs = {f'train_loss/{key}': val for key, val in logs.items()}
-        if self.hparams.log_misc:
-            logs.update({
-                'train_misc/target_depth_max': target_depthmaps.max(),
-                'train_misc/target_depth_min': target_depthmaps.min(),
-                'train_misc/est_depth_max': est_depthmaps.max(),
-                'train_misc/est_depth_min': est_depthmaps.min(),
-                'train_misc/target_image_max': target_images.max(),
-                'train_misc/target_image_min': target_images.min(),
-                'train_misc/est_image_max': est_images.max(),
-                'train_misc/est_image_min': est_images.min(),
-                'train_misc/captimg_max': captimgs_linear.max(),
-                'train_misc/captimg_min': captimgs_linear.min(),
-            })
         if self.hparams.optimize_optics:
             logs.update(self.camera.specific_log(psf_size=self.hparams.psf_size))
         self.log_dict(logs)
@@ -174,66 +140,32 @@ class SnapshotDepth(pl.LightningModule):
             metric.to(self.device)
 
     def validation_epoch_end(self, outputs):
-        de = getattr(self.decoder, 'depth_estimator', None)
-        eval_d = de.training if de is not None else True
-
         val_loss = self.__combine_loss(
-            self.__metrics['mae_depthmap'].compute() if eval_d else 0,
-            self.__metrics['vgg_image'].compute(),
+            self.__metrics['mae_depthmap'].compute() if self.decoder.estimating_depth else 0,
+            self.__metrics['vgg_image'].compute() if self.decoder.estimating_image else 0,
             0.,
             0.
         )
         self.log('validation/val_loss', val_loss)
 
-    def forward(self, img, depthmap, is_testing):
-        # invert the gamma correction for sRGB image
-        img_linear = utils.srgb_to_linear(img)
-
-        if torch.tensor(self.hparams.psf_jitter):
-            # Jitter the PSF on the evaluation as well.
-            captimgs, target_volumes, _ = self.camera(
-                img_linear, depthmap, self.hparams.occlusion, torch.tensor(True)
-            )
-            # We don't want to use the jittered PSF for the pseudo inverse.
-            psf = self.camera.psf_at_camera().unsqueeze(0)
+    def forward(self, img, depthmap, is_testing, precoded=None):
+        if precoded is None:
+            captimgs, psf = self.image(img, depthmap)
         else:
-            captimgs, target_volumes, psf = self.camera(
-                img_linear, depthmap, self.hparams.occlusion
-            )
-
-        # add some Gaussian noise
-        dtype = img.dtype
-        device = img.device
-        noise_sigma_min = self.hparams.noise_sigma_min
-        noise_sigma_max = self.hparams.noise_sigma_max
-        noise_sigma = (noise_sigma_max - noise_sigma_min) * torch.rand(
-            (captimgs.shape[0], 1, 1, 1), device=device, dtype=dtype
-        ) + noise_sigma_min
-
-        # without Bayer
-        if not torch.tensor(self.hparams.bayer):
-            captimgs = captimgs + noise_sigma * torch.randn(captimgs.shape, device=device, dtype=dtype)
-        else:
-            captimgs_bayer = utils.to_bayer(captimgs)
-            captimgs_bayer = captimgs_bayer + noise_sigma * torch.randn(
-                captimgs_bayer.shape, device=device, dtype=dtype
-            )
-            captimgs = self.debayer(captimgs_bayer)
-
-        # Crop the boundary artifact of DFT-based convolution
-        captimgs = utils.crop_boundary(captimgs, self.crop_width)
-        psf = utils.crop_boundary(psf, self.crop_width)
+            captimgs = precoded
+            psf = None
 
         # Apply the Tikhonov-regularized inverse
-        pinv_volumes = inverse.tikhonov_inverse(
-            captimgs, psf, self.hparams.reg_tikhonov, True
-        )
+        # pinv_volumes = inverse.tikhonov_inverse(
+        #     captimgs, psf, self.hparams.reg_tikhonov, True
+        # )
+        pinv_volumes = None
 
-        # Feed the cropped images to CNN
-        if self.training and self.hparams.depth_forcing:
-            model_outputs = self.decoder(captimgs, pinv_volumes, utils.crop_boundary(depthmap, self.crop_width))
-        else:
-            model_outputs = self.decoder(captimgs, pinv_volumes)
+        # # Feed the cropped images to CNN
+        # if self.training and self.hparams.depth_forcing:
+        #     model_outputs = self.decoder(captimgs, pinv_volumes, utils.crop_boundary(depthmap, self.crop_width))
+        # else:
+        model_outputs = self.decoder(captimgs, pinv_volumes)
 
         # Require twice cropping because the image formation also crops the boundary.
         target_images = utils.crop_boundary(img, 2 * self.crop_width)
@@ -250,20 +182,17 @@ class SnapshotDepth(pl.LightningModule):
             psf
         )
 
-    def state_dict(self, destination=None, prefix='', keep_vars=False):
-        states = super().state_dict(destination, prefix, keep_vars)
-        states.update(self.camera.feature_parameters())
-        return states
+    def image(self, img, depthmap):
+        # invert the gamma correction for sRGB image
+        img_linear = utils.srgb_to_linear(img)
 
-    def load_state_dict(self, state_dict, strict: bool = True):
-        try:
-            return super().load_state_dict(state_dict, strict)
-        except RuntimeError as e:
-            msg = e.args[0]
-            keys = map(lambda k: k[1:-1], re.findall(r'"[^"]*"', msg))
-            for k in keys:
-                del state_dict[k]
-            return super().load_state_dict(state_dict, strict)
+        captimgs, _, _ = self.camera(img_linear, depthmap)
+        psf = self.camera.psf_at_camera().unsqueeze(0)
+
+        # Crop the boundary artifact of DFT-based convolution
+        captimgs = utils.crop_boundary(captimgs, self.crop_width)
+        psf = utils.crop_boundary(psf, self.crop_width)
+        return captimgs, psf
 
     def __step_common(
         self, data: dataset.ImageItem, mask: bool = False
@@ -272,7 +201,8 @@ class SnapshotDepth(pl.LightningModule):
         if depth_conf.ndim == 4:
             depth_conf = utils.crop_boundary(depth_conf, self.crop_width * 2)
 
-        outputs = self(data[1], data[2], is_testing=torch.tensor(False))
+        precoded = data[4] if len(data) == 5 else None
+        outputs = self(data[1], data[2], False, precoded)
 
         est, target = outputs.est_depthmap, outputs.target_depthmap
         if mask:
@@ -346,26 +276,56 @@ class SnapshotDepth(pl.LightningModule):
         return res
 
     @staticmethod
-    def add_model_specific_args(parent_parser, arg_config_file):
-        types = {
-            'int': int,
-            'float': float,
-            'str': str
-        }
+    def add_model_specific_args(parser):
+        parser = argparse.ArgumentParser(parents=[parser], add_help=False)
+        # type of camera (DOE) and estimator
+        parser.add_argument(
+            'camera_type', type=str, default='b-spline',
+            help=f'Type identifier of camera, options: {optics.camera_dir.keys()}'
+        )
+        parser.add_argument(
+            'estimator_type', type=str, default='plain',
+            help=f'Type identifier of estimator, options: {reco.model_dir}'
+        )
 
-        parser = argparse.ArgumentParser(parents=[parent_parser], add_help=False)
-        with open(arg_config_file, 'r') as f:
-            args: dict = json.load(f)
+        # tensorboard log options
+        parser.add_argument('--summary_max_images', type=int, default=4)
+        parser.add_argument('--summary_image_sz', type=int, default=256)
+        parser.add_argument('--summary_mask_sz', type=int, default=256)
+        parser.add_argument('--summary_depth_every', type=int, default=1)
+        parser.add_argument('--summary_track_train_every', type=int, default=4000)
 
-        for k, v in args.items():
-            if k.startswith('#'):
-                if k == '#flag':
-                    SnapshotDepth.__argconfig_parse_flag(v, parser)
-                continue
+        # learning rate scheduling parameters
+        parser.add_argument('--cnn_lr', type=float, default=1e-3)
+        parser.add_argument('--optics_lr', type=float, default=1e-9)
+        parser.add_argument('--lr_decay_since', type=int, default=40)
+        parser.add_argument('--lr_decay_every', type=int, default=10)
+        parser.add_argument('--lr_decay_factor', type=float, default=0.1)
 
-            if 'type' in v:
-                v['type'] = types[v['type']]
-            parser.add_argument(f'--{k}', **v)
+        # loss related
+        parser.add_argument('--depth_loss_weight', type=float, default=1)
+        parser.add_argument('--image_loss_weight', type=float, default=0.1)
+        parser.add_argument('--psf_expansion_loss_weight', type=float, default=1)
+        parser.add_argument('--mtf_loss_weight', type=float, default=1)
+        parser.add_argument('--loss_items', nargs='*')
+
+        # module initialization options
+        parser.add_argument('--init_optics', default='')
+        parser.add_argument('--init_cnn', default='')
+
+        # data augmentation
+        utils.add_switch(parser, 'randcrop', False, '')
+        utils.add_switch(parser, 'augment', False, '')
+
+        # others
+        parser.add_argument('--batch_sz', type=int, default=64)
+        parser.add_argument('--reg_tikhonov', type=float, default=1)
+        parser.add_argument('--num_workers', type=int, default=8)
+
+        ctype = sys.argv[1]
+        etype = sys.argv[2]
+        parser = optics.get_camera(ctype).add_specific_args(parser)
+        parser = reco.get_model(etype).add_specific_args(parser)
 
         return parser
 
@@ -373,17 +333,5 @@ class SnapshotDepth(pl.LightningModule):
     def construct_from_checkpoint(ckpt, print_info=False):
         hparams = ckpt['hyper_parameters']
         model = SnapshotDepth(hparams, print_info=print_info)
-        model.camera.load_state_dict(ckpt['state_dict'])
-        model.decoder.load_state_dict(utils.load_decoder_dict(ckpt))
+        model.load_state_dict(ckpt['state_dict'])
         return model
-
-    @staticmethod
-    def __argconfig_parse_flag(flags: dict, parser: argparse.ArgumentParser):
-        for name, v in flags.items():
-            if not isinstance(v, dict):
-                dest, default = name, v
-            else:
-                dest, default = v['dest'], v['default']
-            parser.add_argument(f'--{name}', dest=dest, action='store_true')
-            parser.add_argument(f'--no-{name}', dest=dest, action='store_false')
-            parser.set_defaults(**{dest: default})

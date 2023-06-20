@@ -1,18 +1,15 @@
 import collections
+import typing
 
 import torch
 import torch.nn as nn
 
 from .unet import UNet
-from .base import EstimatorBase
+from .base import EstimatorBase, ReconstructionOutput
 import utils
 
-CH_DEPTH = 1
-CH_RGB = 3
-ReconstructionOutput = collections.namedtuple('ReconstructionOutput', ['est_img', 'est_depthmap'])
 
-
-class Reconstructor(EstimatorBase):
+class UNetBased(EstimatorBase):
 
     def __init__(
         self,
@@ -41,11 +38,11 @@ class Reconstructor(EstimatorBase):
             nn.ReLU()
         )
 
-        output_blocks = [nn.Conv2d(ch_base, ch_out, kernel_size=1, bias=True)]
+        output_blocks = [nn.Conv2d(32, ch_out, kernel_size=1, bias=True)]
         output_layer = nn.Sequential(*output_blocks)
-        self.__decoder = nn.Sequential(
+        self.decoder = nn.Sequential(
             input_layer,
-            UNet([ch_base, ch_base, 64, 64, 128]),
+            UNet([ch_base, 32, 64, 64, 128]),
             output_layer,
         )
 
@@ -55,13 +52,25 @@ class Reconstructor(EstimatorBase):
         b, _, _, h, w = pin_volume.shape
         inputs = torch.cat([capt_img.unsqueeze(2), pin_volume], 2)
 
-        est = self.__decoder(inputs.reshape(b, -1, h, w))
+        est = self.decoder(inputs.reshape(b, -1, h, w))
         est = torch.sigmoid(est)
 
         img = est[:, :-1] if self._image else utils.linear_to_srgb(capt_img)
         depth = est[:, [-1]] if self._depth else torch.zeros(b, 1, h, w)
         return ReconstructionOutput(img, depth)
 
+    def load_state_dict(self, state_dict, strict: bool = True):
+        ks = list(filter(lambda k: '_Reconstructor__decoder' in k, state_dict.keys()))
+        for k in ks:
+            nk = k.replace('_Reconstructor__decoder', 'decoder')
+            state_dict[nk] = state_dict[k]
+            del state_dict[k]
+        return super().load_state_dict(state_dict, strict)
+
     @classmethod
-    def construct(cls, recipe):
-        return cls(**recipe)
+    def extract_parameters(cls, kwargs) -> typing.Dict:
+        return {
+            'n_depth': kwargs['n_depths'],
+            'estimate_depth': True,
+            'estimate_image': True
+        }
