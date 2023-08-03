@@ -2,14 +2,18 @@ import functools
 import argparse
 
 import matplotlib.pyplot as plt
+import pytorch_lightning as pl
 
 import optics
 import utils
 from optics.kernel import *
-from model.snapshotdepth import SnapshotDepth
+from model.system import RGBDImagingSystem
 import utils.fft as fft
 import utils.old_complex as old_c
 import algorithm
+
+
+pl.seed_everything(123)
 
 
 def focus_shift(original_aber, s, d, wavelength):
@@ -20,21 +24,21 @@ def focus_shift(original_aber, s, d, wavelength):
     return lambda u, v: old_c.multiply(original_aber(u, v), __focus_shift(u, v))
 
 
-def load_trained_lens(ckpt_path) -> optics.Camera:
+def load_trained_lens(ckpt_path) -> optics.DOECamera:
     ckpt = utils.compatible_load(ckpt_path)[0]
-    model = SnapshotDepth.construct_from_checkpoint(ckpt)
+    model = RGBDImagingSystem.construct_from_checkpoint(ckpt)
     model = model.to(torch.device('cpu'))
     model.eval()
     return model.camera
 
 
-def construct_trained_lens(ckpt_path) -> optics.Camera:
+def construct_trained_lens(ckpt_path) -> optics.DOECamera:
     hparams = utils.compatible_load(ckpt_path)[1]
     hparams['initialization_type'] = 'lattice_focal'
     # hparams['min_depth'] = 0.85
     # hparams['max_depth'] = 100
     hparams['f_number'] = 2
-    model = SnapshotDepth(hparams)
+    model = RGBDImagingSystem(hparams)
     model = model.to('cpu')
     model.eval()
     return model.camera
@@ -43,7 +47,7 @@ def construct_trained_lens(ckpt_path) -> optics.Camera:
 def predefined_lens_spectrum(delta0, f, d, aperture, wl, s, aber):
     delta = get_delta(delta0, f, d)
     max_frequency = 1 / (1 * delta)
-    grid_size = 2 * int(aperture / delta)
+    grid_size = 4 * int(aperture / delta)
 
     return kernel_spectrum(
         focus_shift(aber, s, d, wl) if s else aber,
@@ -82,7 +86,8 @@ def lattice_focal_spectrum(
     s = torch.randn(n * n) * slope_range / 4
 
     def __lattice_focus_shift(u, v):
-        r2, slopemap, index = algorithm.slopemap(u, v, n, slope_range, aperture, s)
+        slopemap, index = algorithm.slopemap(u, v, n, slope_range, aperture, s)
+        r2 = u ** 2 + v ** 2
         if show_slopemap:
             plt.imshow(slopemap[2][2].detach())
             plt.show()
@@ -94,7 +99,7 @@ def lattice_focal_spectrum(
             if show_heightmap:
                 plt.imshow(heightmap[2][2].detach())
                 plt.show()
-            phase = optics.heightmap2phase(heightmap, wl, optics.refractive_index(wl))
+            phase = utils.heightmap2phase(heightmap, wl, utils.refractive_index(wl))
         else:
             phase = np.pi * slopemap * r2 / (wl * focal_depth)
 
@@ -112,7 +117,7 @@ def trained_lens_spectrum(camera):
     delta = get_delta(camera.camera_pitch, camera.focal_length, camera.focal_depth)
     max_f = 1 / delta
     grid_size = 2 * int(camera.aperture_diameter / delta)
-    wl = camera.buf_wavelengths[camera.n_wavelengths // 2]
+    wl = camera.design_wavelength
 
     return kernel_spectrum(
         functools.partial(camera.aberration, wavelength=wl),
@@ -129,18 +134,22 @@ if __name__ == '__main__':
     parser.add_argument('--ckpt_path', type=str)
     parser.add_argument('--id', type=str, default='kernel_spectrum')
     parser.add_argument('--save_path', type=str, default=None)
-    parser.add_argument('--scale_exponent', type=float, default=0.3)
+    parser.add_argument('--scale_exponent', type=float, default=0.5)
     args = parser.parse_args()
 
     spectrum = None
     if args.type == 'plain':
-        params = (7e-6, 85e-3, 0.7)
+        params = (7e-6, 85e-3, 0.7)  # camera pixel, focal length, focal depth
         spectrum = plain_lens_spectrum(*params, 200 * get_delta(*params), 550e-9, 0)
     elif args.type == 'lattice':
         params = (7e-6, 85e-3, 0.7)
+        # params = (6.45e-6, 50e-3, 1.667)
+        # depth_range = (1, 5)
+        depth_range = (0.35, 100)
         spectrum = lattice_focal_spectrum(
-            params[0], params[1], 0.35, 100, 1000 * get_delta(*params), 550e-9,
+            params[0], params[1], *depth_range, 50e-3, 550e-9,
             by_heightmap=False
+            # *([True] * 3)
         )
     elif args.type == 'trained':
         spectrum = trained_lens_spectrum(load_trained_lens(args.ckpt_path))
@@ -149,6 +158,6 @@ if __name__ == '__main__':
 
     spectrum = spectrum ** args.scale_exponent
     if args.save_path is None:
-        utils.plot_spectrum(spectrum.detach())
+        utils.plot_spectrum(spectrum.detach(), '')
     else:
-        utils.plot_spectrum(spectrum.detach(), save=True, path=args.save_path, id=args.id)
+        utils.plot_spectrum(spectrum.detach(), 'spectrum', saving_path=args.save_path)

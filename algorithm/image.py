@@ -14,7 +14,18 @@ def _over_op(alpha):
     return torch.cat([torch.ones((bs, cs, 1, hs, ws), dtype=out.dtype, device=out.device), out[:, :, :-1]], dim=-3)
 
 
-def __old_image_formation(volume, layered_mask, psf, occlusion, eps=1e-3):
+def __old_image_formation(volume, layered_mask, psf, occlusion=True, eps=1e-3):
+    """
+    Nonlinear occlution-aware image foramtion model from
+    `Depth From Defocus With Learned Optics - Ikoma et al.
+    <http://www.computationalimaging.org/publications/deepopticsdfd/>`__
+    :param volume: 3D image tensor with shape ... x C x D x H x W
+    :param layered_mask: Binary mask with the same shape
+    :param psf: PSF with shape C x D x H x W
+    :param occlusion: Whether to use nonlinear model
+    :param eps:
+    :return: Captured image with shape ... x C x H x W
+    """
     scale = volume.max()
     volume = volume / scale
     f_psf = torch.rfft(psf, 2)

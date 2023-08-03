@@ -26,6 +26,15 @@ def __edgetaper3d(img: torch.Tensor, psf: torch.Tensor) -> torch.Tensor:
 def __old_tikhonov_inverse_closed_form(
     y: torch.Tensor, g: torch.Tensor, gamma=0.1
 ) -> torch.Tensor:
+    """
+    Preconditioning operation with approximate inverse from
+    `Depth From Defocus With Learned Optics - Ikoma et al.
+    <http://www.computationalimaging.org/publications/deepopticsdfd/>`__
+    :param y:
+    :param g:
+    :param gamma: Regularization factor
+    :return: Approximate inversed volume with shape ... x C x D x H x W
+    """
     device = y.device
     dtype = y.dtype
     num_colors, num_shots, depth, height, width = g.shape[1:6]

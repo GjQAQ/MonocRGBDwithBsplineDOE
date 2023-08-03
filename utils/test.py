@@ -170,7 +170,7 @@ def eval_checkpoint(metrics, ckpt_path, override=None, **kwargs):
     if __sf is None:
         __init_dataset(hparams)
 
-    model = mod.SnapshotDepth.construct_from_checkpoint(ckpt)
+    model = mod.RGBDImagingSystem.construct_from_checkpoint(ckpt)
     model = model.to(device)
     model.eval()
 

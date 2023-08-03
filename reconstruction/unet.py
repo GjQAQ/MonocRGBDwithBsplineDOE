@@ -5,6 +5,8 @@ from torch import nn as nn
 
 __all__ = ['UNet']
 
+import utils
+
 
 class ConvolutionBlock(nn.Module):
     def __init__(self, ch_in: int, ch_out: int, norm: nn.Module, momentum=1e-2):
@@ -49,7 +51,8 @@ class UpSampleBlock(nn.Module):
         # self.upsample = nn.ConvTranspose2d(ch_in - ch_out, ch_in - ch_out, 4, 2, 1)
 
     def forward(self, x, y):
-        return self.block(torch.cat([self.upsample(x), y], 1))
+        x = utils.pad_or_crop(self.upsample(x), y.shape[-2:])
+        return self.block(torch.cat([x, y], 1))
 
 
 class UNet(nn.Module):
@@ -62,6 +65,7 @@ class UNet(nn.Module):
         self.downblocks = nn.ModuleList()
         self.upblocks = nn.ModuleList()
         self.__n = len(channels) - 1
+        channels = list(channels)
         channels.append(channels[-1])
 
         norm_layer = norm_layer or nn.BatchNorm2d

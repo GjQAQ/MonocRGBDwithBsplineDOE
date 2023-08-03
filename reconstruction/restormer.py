@@ -213,17 +213,18 @@ class Upsample(nn.Module):
 
 
 class Restormer(nn.Module):
-    def __init__(self,
-                 inp_channels=3,
-                 out_channels=4,  # modified, RGBD
-                 dim=48,
-                 num_blocks=(4, 6, 6, 8),
-                 num_refinement_blocks=4,
-                 heads=(1, 2, 4, 8),
-                 ffn_expansion_factor=2.66,
-                 bias=False,
-                 layer_norm_type='WithBias',  # Other option 'BiasFree'
-                 ):
+    def __init__(
+        self,
+        inp_channels=3,
+        out_channels=4,  # modified, RGBD
+        dim=48,
+        num_blocks=(4, 6, 6, 8),
+        num_refinement_blocks=4,
+        heads=(1, 2, 4, 8),
+        ffn_expansion_factor=2.66,
+        bias=False,
+        layer_norm_type='WithBias',  # Other option 'BiasFree'
+    ):
         super(Restormer, self).__init__()
 
         self.patch_embed = OverlapPatchEmbed(inp_channels, dim)
@@ -303,6 +304,16 @@ class Restormer(nn.Module):
 
         self.output = nn.Conv2d(int(dim * 2 ** 1), out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
 
+        # additional
+        # self.depth_refinement = nn.Sequential(*[TransformerBlock(
+        #     dim=int(dim * 2 ** 1),
+        #     num_heads=heads[0],
+        #     ffn_expansion_factor=ffn_expansion_factor,
+        #     bias=bias,
+        #     layer_norm_type=layer_norm_type
+        # ) for _ in range(2)])
+        # self.depth_output = nn.Conv2d(dim * 2, 1, 3, 1, 1, bias=bias)
+
     def forward(self, inp_img):
         inp_enc_level1 = self.patch_embed(inp_img)
         out_enc_level1 = self.encoder_level1(inp_enc_level1)
@@ -330,26 +341,69 @@ class Restormer(nn.Module):
         inp_dec_level1 = torch.cat([inp_dec_level1, out_enc_level1], 1)
         out_dec_level1 = self.decoder_level1(inp_dec_level1)
 
-        out_dec_level1 = self.refinement(out_dec_level1)
+        rgb = self.refinement(out_dec_level1)
+        rgb = self.output(rgb)
+        rgb[:, :3] += inp_img
+        rgb[:, [3]] = torch.sigmoid(rgb[:, [3]])
+        return rgb
+        # rgb = self.output(self.refinement(out_dec_level1))
+        # depth = self.depth_output(self.depth_refinement(out_dec_level1))
+        # return torch.cat((rgb, depth), 1)
 
-        out_dec_level1 = self.output(out_dec_level1)
-        out_dec_level1[:, :3] += inp_img
-        out_dec_level1[:, [3]] = torch.sigmoid(out_dec_level1[:, [3]])
 
-        return out_dec_level1
-
-
-class RestormerAlt(EstimatorBase):
+class RestormerEstimator(EstimatorBase):
     def __init__(self, **kwargs):
         super().__init__()
-        self._depth = True
-        self._image = True
-
         self.restormer = Restormer(**kwargs)
 
     def forward(self, capt_img, pin_volume) -> ReconstructionOutput:
-        pred = self.restormer(capt_img)
+        # b, _, _, h, w = pin_volume.shape
+        # inputs = torch.cat([capt_img.unsqueeze(2), pin_volume], 2)
+        # inputs = inputs.reshape(b, -1, h, w)
+        inputs = capt_img
+
+        pred = self.restormer(inputs)
         return ReconstructionOutput(
             utils.linear_to_srgb(pred[:, :3]),
             pred[:, [3]]
         )
+
+    @classmethod
+    def extract_parameters(cls, kwargs) -> typing.Dict:
+        return {
+            'inp_channels': kwargs['rest_in_ch'],
+            'out_channels': kwargs['rest_out_ch'],
+            'dim': kwargs['rest_uni_ch'],
+            'num_blocks': tuple(kwargs['rest_num_blocks'] or (4, 6, 6, 8)),
+            'num_refinement_blocks': kwargs['rest_num_refine'],
+            'heads': tuple(kwargs['rest_heads'] or (1, 2, 4, 8)),
+            'ffn_expansion_factor': kwargs['rest_ch_expansion'],
+            'bias': kwargs['rest_bias'],
+            'layer_norm_type': 'WithBias' if kwargs['rest_ln_bias'] else 'BiasFree'
+        }
+
+    @classmethod
+    def add_specific_args(cls, parser):
+        parser = super().add_specific_args(parser)
+        parser.add_argument('--rest_in_ch', type=int, default=3)
+        parser.add_argument('--rest_out_ch', type=int, default=3)
+        parser.add_argument('--rest_uni_ch', type=int, default=48)
+        parser.add_argument('--rest_num_blocks', type=int, nargs='*')
+        parser.add_argument('--rest_num_refine', type=int, default=4)
+        parser.add_argument('--rest_heads', type=int, nargs='*')
+        parser.add_argument('--rest_ch_expansion', type=float, default=2.66)
+        utils.add_switch(parser, 'rest_ln_bias', True, '')
+        utils.add_switch(parser, 'rest_bias', False, '')
+        return parser
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        replaced = {k: v for k, v in state_dict.items()}
+
+        key = 'restormer.patch_embed.proj.weight'
+        self.restormer.patch_embed.proj.weight.data[:, :3] = replaced[key]
+        replaced[key] = self.restormer.patch_embed.proj.weight
+
+        key = 'restormer.output.weight'
+        self.restormer.output.weight.data[:3] = replaced[key]
+        replaced[key] = self.restormer.output.weight
+        return super().load_state_dict(replaced, strict)

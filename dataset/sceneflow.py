@@ -7,16 +7,33 @@ import numpy as np
 import imageio
 import kornia.augmentation as augmentation
 import kornia.filters as filters
+from torchvision import io
+from tqdm import tqdm
 
 import dataset
 import dataset.img_transform
+from utils import srgb_to_linear, crop_boundary
+
+
+def sf_paths(root):
+    paths = {}
+    for p in ('train', 'val'):
+        paths[p] = {
+            'img': os.path.join(
+                root, 'FlyingThings3D_subset', p, 'image_clean', 'right'
+            ),
+            'disparity': os.path.join(
+                root, 'FlyingThings3D_subset_disparity', p, 'disparity', 'right'
+            )
+        }
+    return paths
 
 
 class SceneFlow(data.Dataset):
     def __init__(
         self,
         sf_root: str,
-        partition: str,
+        split: str,
         image_size: typing.Tuple[int, int],
         is_training: bool = True,
         random_crop: bool = False,
@@ -26,27 +43,18 @@ class SceneFlow(data.Dataset):
         ignore_incomplete: bool = True
     ):
         super().__init__()
-        self.__dataset_path = {}
-        for p in ('train', 'val'):
-            self.__dataset_path[p] = {
-                'img': os.path.join(
-                    sf_root, 'FlyingThings3D_subset', p, 'image_clean', 'right'
-                ),
-                'disparity': os.path.join(
-                    sf_root, 'FlyingThings3D_subset_disparity', p, 'disparity', 'right'
-                )
-            }
+        self.__dataset_path = sf_paths(sf_root)
 
-        if partition not in self.__dataset_path:
-            raise ValueError(f'Wrong dataset: {partition}; expected: {self.__dataset_path.keys()}')
+        if split not in self.__dataset_path:
+            raise ValueError(f'Wrong dataset: {split}; expected: {self.__dataset_path.keys()}')
 
         self.__transform = dataset.img_transform.RandomTransform(image_size, random_crop, augment)
         self.__centercrop = augmentation.CenterCrop(image_size)
 
         self.__records = []
         pfm_missing_ids = []
-        img_dir = self.__dataset_path[partition]['img']
-        disparity_dir = self.__dataset_path[partition]['disparity']
+        img_dir = self.__dataset_path[split]['img']
+        disparity_dir = self.__dataset_path[split]['disparity']
         for filename in sorted(os.listdir(img_dir)):
             if not filename.endswith('.png'):
                 continue
@@ -65,15 +73,15 @@ class SceneFlow(data.Dataset):
         self.__is_training = torch.tensor(is_training)
         self.__padding = padding
         self.__n_depths = n_depths
-        self.__partition = partition
+        self.split = split
 
     def __len__(self):
         return len(self.__records)
 
     def __getitem__(self, item: int) -> dataset.img_transform.ImageItem:
         id_ = self.__records[item]
-        img_dir = self.__dataset_path[self.__partition]['img']
-        disparity_dir = self.__dataset_path[self.__partition]['disparity']
+        img_dir = self.__dataset_path[self.split]['img']
+        disparity_dir = self.__dataset_path[self.split]['disparity']
 
         img, depthmap = self.__prepare(
             os.path.join(img_dir, f'{id_}.png'),
@@ -89,7 +97,7 @@ class SceneFlow(data.Dataset):
         depthmap = filters.gaussian_blur2d(depthmap, sigma=(0.8, 0.8), kernel_size=(5, 5))
         img, depthmap = img.squeeze(0), depthmap.squeeze(0)
 
-        return dataset.img_transform.ImageItem(id_, img, depthmap, torch.ones_like(depthmap))
+        return dataset.ImageItem(id_, img, depthmap, torch.ones_like(depthmap))
 
     def __prepare(
         self, img_path: str, disparity_path: str
@@ -110,3 +118,31 @@ class SceneFlow(data.Dataset):
         depthmap = 1 - disparity / disparity.max()  # depth of the nearest is 0
 
         return img, depthmap
+
+
+class PreCodedSceneFlow(SceneFlow):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        root = args[0]
+        self.__pre_path = sf_paths(root + '_pre')[self.split]['img']
+
+    def __getitem__(self, index):
+        original = super().__getitem__(index)
+
+        path = os.path.join(self.__pre_path, f'{original[0]}.png')
+        img = io.read_image(path).to(torch.float32) / 255
+        return original[0], original[1], original[2], original[3], img
+
+    @classmethod
+    def prepare(cls, root_path, base, split, model, batch_size=1):
+        path = sf_paths(root_path)[split]['img']
+        os.makedirs(path, exist_ok=True)
+        loader = data.DataLoader(base, batch_size)
+
+        for batch in tqdm(loader, ncols=50, unit='batch'):
+            coded, _ = model.image(batch[1].to('cuda'), batch[2].to('cuda'))
+            coded = (coded * 255).to(torch.uint8).cpu()
+            for i, id_ in enumerate(batch[0]):
+                img_path = os.path.join(path, f'{id_}.png')
+                io.write_png(coded[i], img_path)

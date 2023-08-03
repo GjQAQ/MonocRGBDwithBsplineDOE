@@ -1,5 +1,4 @@
 import typing
-from typing import Union, Dict
 
 import torch
 from torch import Tensor
@@ -8,6 +7,7 @@ import scipy.interpolate as intp
 
 import optics
 import utils.fft as fft
+import utils
 import algorithm
 
 
@@ -32,15 +32,17 @@ class BSplineApertureCamera(optics.ClassicCamera):
         **kwargs
     ):
         r"""
-        Construct a camera model whose aperture surface is characterized as a B-spline surface.
+        Construct a camera model whose DOE surface is characterized as a B-spline surface.
         The parameters to be trained are control points :math:`c_{ij}, 0\leq i<N, 0\leq j<M`
         Control points are located evenly on aperture plane, i.e. the area
-        .. math::
-            [-D/2, D/2] × [-D/2, D/2]
-        where D is the diameter of the aperture
+
+        :math:`[-D/2, D/2] \times [-D/2, D/2]`
+
+        where D is the diameter of the aperture.
         When compute the height of point :math:`(u,v)` on aperture, the coordinates will be normalized:
-        .. math::
-            u'=(u+D/2)/D
+
+        :math:`u'=(u+D/2)/D`
+
         :param grid_size: Size of control points grid :math:`(N,M)`
         :param knot_vectors: Knot vectors, default to which used in clamped B-spline
         :param degrees:
@@ -50,13 +52,15 @@ class BSplineApertureCamera(optics.ClassicCamera):
         super().__init__(**kwargs)
 
         if knot_vectors is None:
-            self.__degrees = degrees
+            self.degrees = degrees
             knot_vectors = (
                 clamped_knot_vector(grid_size[0], degrees[0]), clamped_knot_vector(grid_size[1], degrees[1]))
         else:
-            self.__degrees = (len(knot_vectors[0]) - grid_size[0] - 1, len(knot_vectors[1]) - grid_size[1] - 1,)
-        self.__grid_size = grid_size
-        self.__knot_vectors = knot_vectors
+            self.degrees = (len(knot_vectors[0]) - grid_size[0] - 1, len(knot_vectors[1]) - grid_size[1] - 1,)
+        self.grid_size = grid_size
+        self.knot_vectors = knot_vectors
+        self.u_matrix: torch.Tensor = ...
+        self.v_matrix: torch.Tensor = ...
 
         if init_type == 'lattice_focal':
             init = self.lattice_focal_init()
@@ -65,16 +69,13 @@ class BSplineApertureCamera(optics.ClassicCamera):
         self.control_points = torch.nn.Parameter(init, requires_grad=requires_grad)
 
         # buffered tensors used to compute heightmap in psf
-        self.register_buffer('buf_u_matrix', self.__design_matrix(1), persistent=False)
-        self.register_buffer('buf_v_matrix', self.__design_matrix(0), persistent=False)
+        self.register_buffer('u_matrix', self.design_matrix(1), persistent=False)
+        self.register_buffer('v_matrix', self.design_matrix(0), persistent=False)
 
-    def psf_out_energy(self, psf_size: int):
-        return 0, 0  # todo
-
-    def compute_heightmap(self):
+    def heightmap(self):
         return self.__heightmap(
-            self.buf_u_matrix,
-            self.buf_v_matrix,
+            self.u_matrix,
+            self.v_matrix,
             self.control_points.unsqueeze(0)
         )  # n_wl x N_u x N_v
 
@@ -82,8 +83,8 @@ class BSplineApertureCamera(optics.ClassicCamera):
     def lattice_focal_init(self):
         slope_range, n, wl = self.prepare_lattice_focal_init()
         r = self.aperture_diameter / 2
-        u = torch.linspace(-r, r, self.__grid_size[0])[None, ...]
-        v = torch.linspace(-r, r, self.__grid_size[1])[..., None]
+        u = torch.linspace(-r, r, self.grid_size[0])[None, ...]
+        v = torch.linspace(-r, r, self.grid_size[1])[..., None]
         return algorithm.slope2height(
             u, v,
             *algorithm.slopemap(u, v, n, slope_range, self.aperture_diameter, fill='inscribe'),
@@ -93,17 +94,17 @@ class BSplineApertureCamera(optics.ClassicCamera):
     @torch.no_grad()
     def aberration(self, u, v, wavelength: float = None):
         if wavelength is None:
-            wavelength = self.buf_wavelengths[len(self.buf_wavelengths) / 2]
+            wavelength = self.wavelengths[len(self.wavelengths) / 2]
         c = self.control_points.cpu()[None, None, ...]
 
         r2 = u ** 2 + v ** 2
-        scaled_u = self._scale_coordinate(u).squeeze(-2)  # 1 x omega_x x t1
-        scaled_v = self._scale_coordinate(v).squeeze(-1)  # omega_y x 1 x t2
-        u_mat = self.__design_matrices(scaled_u, c.shape[-2], self.__knot_vectors[0], self.__degrees[0])
-        v_mat = self.__design_matrices(scaled_v, c.shape[-1], self.__knot_vectors[1], self.__degrees[1])
+        scaled_u = self.scale_coordinate(u).squeeze(-2)  # 1 x omega_x x t1
+        scaled_v = self.scale_coordinate(v).squeeze(-1)  # omega_y x 1 x t2
+        u_mat = self.design_matrices(scaled_u, c.shape[-2], self.knot_vectors[0], self.degrees[0])
+        v_mat = self.design_matrices(scaled_v, c.shape[-1], self.knot_vectors[1], self.degrees[1])
         h = self.__heightmap(u_mat, v_mat, c)
 
-        phase = optics.heightmap2phase(h, wavelength, optics.refractive_index(wavelength))
+        phase = utils.heightmap2phase(h, wavelength, utils.refractive_index(wavelength))
         phase = torch.transpose(phase, 0, 1)
         return self.apply_circular_stop(
             fft.exp2xy(1, phase),
@@ -113,10 +114,10 @@ class BSplineApertureCamera(optics.ClassicCamera):
         )
 
     @torch.no_grad()
-    def heightmap_log(self, size):
+    def heightmap_log(self, size, normalize=True):
         m = []
         axis = []
-        for sz, kv, p in zip(size, self.__knot_vectors, self.__degrees):
+        for sz, kv, p in zip(size, self.knot_vectors, self.degrees):
             axis.append(torch.linspace(0, 1, sz))
             m.append(torch.from_numpy(design_matrix(axis[-1], kv, p)))
 
@@ -125,8 +126,9 @@ class BSplineApertureCamera(optics.ClassicCamera):
         u = u - 0.5
         v = v - 0.5
         h = self.apply_stop(h, 0.5, x=u, y=v, r2=u ** 2 + v ** 2).unsqueeze(0)
-        h -= h.min()
-        h /= h.max()
+        if normalize:
+            h -= h.min()
+            h /= h.max()
         return h
 
     @classmethod
@@ -156,20 +158,20 @@ class BSplineApertureCamera(optics.ClassicCamera):
         return base
 
     @torch.no_grad()
-    def __design_matrix(self, dim):
-        n, kv, p = self._image_size[dim], self.__knot_vectors[dim], self.__degrees[dim]
-        x = torch.flatten(self.u_axis if dim == 1 else self.v_axis, -2, -1)
+    def design_matrix(self, dim):
+        n, kv, p = self.image_size[dim], self.knot_vectors[dim], self.degrees[dim]
+        x = torch.flatten(self.u_grid if dim == 1 else self.v_grid, -2, -1)
 
-        x = self._scale_coordinate(x)
+        x = self.scale_coordinate(x)
         m = torch.stack([torch.from_numpy(design_matrix(x[i].numpy(), kv, p)) for i in range(x.shape[0])])
         return m  # n_wl x N x n_ctrl
 
-    @staticmethod
-    def __heightmap(u, v, c) -> Tensor:
-        return torch.matmul(torch.matmul(u, c), v.transpose(-1, -2))
+    def __heightmap(self, u, v, c) -> Tensor:
+        h = torch.matmul(torch.matmul(u, c), torch.transpose(v, -1, -2))
+        return utils.fold_profile(h, self.design_wavelength)
 
     @staticmethod
-    def __design_matrices(x, c_n, kv, p):
+    def design_matrices(x, c_n, kv, p):
         mat = torch.zeros(*x.shape, c_n)
 
         shape = x.shape

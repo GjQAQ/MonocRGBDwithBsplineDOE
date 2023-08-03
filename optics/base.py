@@ -12,7 +12,6 @@ import algorithm.image
 import utils
 from utils import fft as fft, old_complex as old_complex
 
-
 camera_dir = {}
 aperture_types = ('circular', 'square')
 
@@ -33,40 +32,7 @@ def construct_camera(name, params):
     return ct(**ct.extract_parameters(params))
 
 
-def heightmap2phase(height, wavelength, refractive_index):
-    return height * (2 * np.pi / wavelength) * (refractive_index - 1)
-
-
-def refractive_index(wavelength, a=1.5375, b=0.00829045, c=-0.000211046):
-    """Cauchy's equation - dispersion formula
-    Default coefficients are for NOA61.
-    https://refractiveindex.info/?shelf=other&book=Optical_adhesives&page=Norland_NOA61
-    """
-    return a + b / (wavelength * 1e6) ** 2 + c / (wavelength * 1e6) ** 4
-
-
-@torch.no_grad()
-def _depthmap2layers(depthmap, n_depths, binary=False):
-    depthmap = depthmap[:, None, ...]  # add color dim
-
-    depthmap = depthmap.clamp(1e-8, 1.0)
-    d = torch.arange(
-        0, n_depths, dtype=depthmap.dtype, device=depthmap.device
-    ).reshape(1, 1, -1, 1, 1) + 1
-    depthmap = depthmap * n_depths
-    diff = d - depthmap
-    layered_mask = torch.zeros_like(diff)
-    if binary:
-        layered_mask[torch.logical_and(diff >= 0., diff < 1.)] = 1.
-    else:
-        mask = torch.logical_and(diff > -1., diff <= 0.)
-        layered_mask[mask] = diff[mask] + 1.
-        layered_mask[torch.logical_and(diff > 0., diff <= 1.)] = 1.
-
-    return layered_mask
-
-
-class Camera(nn.Module, metaclass=abc.ABCMeta):
+class DOECamera(nn.Module, metaclass=abc.ABCMeta):
     def __init__(
         self, *,
         focal_depth: float,
@@ -79,11 +45,11 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
         camera_pitch: float,
         wavelengths=(632e-9, 550e-9, 450e-9),
         diffraction_efficiency=0.7,
-        loss_items: typing.Tuple[str] = (),
         aperture_type='circular',
         occlusion=True,
         bayer=True,
-        noise_sigma=(1e-3, 5e-3)
+        noise_sigma=(1e-3, 5e-3),
+        design_wavelength=None
     ):
         super().__init__()
         self.__applying_stop = {
@@ -94,51 +60,35 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
             raise ValueError(f'Provided min depth({min_depth}) is too small')
         if aperture_type not in self.__applying_stop:
             raise ValueError(f'Unknown aperture type: {aperture_type}')
+        if design_wavelength is None:
+            design_wavelength = wavelengths[len(wavelengths) // 2]
 
-        scene_distances = utils.ips_to_metric(
-            torch.linspace(0, 1, steps=n_depths), min_depth, max_depth
+        self.debayer = debayer.Debayer3x3() if bayer else None
+
+        self.aperture_diameter = aperture_diameter
+        self.aperture_type = aperture_type
+        self.camera_pitch = camera_pitch
+        self.depth_range = (min_depth, max_depth)
+        self.design_wavelength = design_wavelength
+        self.diffraction_efficiency = diffraction_efficiency
+        self.focal_depth = focal_depth
+        self.focal_length = focal_length
+        self.image_size = self.regularize_image_size(image_size)
+        self.noise_sigma = noise_sigma
+        self.n_depths = n_depths
+        self.occlusion = occlusion
+        self.scene_distances: torch.Tensor = ...
+        self.wavelengths: torch.Tensor = ...
+
+        self.register_buffer(
+            'scene_distances',
+            utils.ips_to_metric(torch.linspace(0, 1, steps=n_depths), min_depth, max_depth),
+            persistent=False
         )
-
-        self.debayer = debayer.Debayer3x3()
-
-        self._diffraction_efficiency = diffraction_efficiency
-        self._n_depths = n_depths
-        self.__min_depth = min_depth
-        self.__max_depth = max_depth
-        self.__focal_depth = focal_depth
-        self.__aperture_diameter = aperture_diameter
-        self._camera_pitch = camera_pitch
-        self.__focal_length = focal_length
-        self._image_size = self.regularize_image_size(image_size)
-        self.__loss_items = loss_items
-        self.__aperture_type = aperture_type
-        self.__occlusion = occlusion
-        self.__bayer = bayer
-        self.__noise_sigma = noise_sigma
-
-        self.__register_wavlength(wavelengths)
-        self.register_buffer('buf_scene_distances', scene_distances, persistent=False)
-
-        if 'mtf' in loss_items:
-            s = self.slope_range
-            fy = torch.linspace(-0.5, 0.5, self._image_size[-2]).reshape(-1, 1) / self.camera_pitch
-            fx = torch.linspace(-0.5, 0.5, self._image_size[-1]).reshape(1, -1) / self.camera_pitch
-            mtf_bound = self.aperture_diameter ** 3 / (s * torch.sqrt(fx ** 2 + fy ** 2))
-            self.register_buffer('buf_mtf_bound', mtf_bound, persistent=False)
-        else:
-            self.mtf_loss = lambda *args, **kwargs: 0
-        if 'psf_expansion' not in loss_items:
-            self.psf_out_energy = lambda *args, **kwargs: (0, 0)
-
-        self._diffraction_scaler = None
-        self.__psf_cache = None
+        self.register_buffer('wavelengths', torch.tensor(wavelengths), persistent=False)
 
     @abc.abstractmethod
     def psf(self, scene_distances, modulate_phase) -> torch.Tensor:
-        pass
-
-    @abc.abstractmethod
-    def psf_out_energy(self, psf_size: int) -> typing.Tuple[float, float]:
         pass
 
     @abc.abstractmethod
@@ -150,81 +100,82 @@ class Camera(nn.Module, metaclass=abc.ABCMeta):
         pass
 
     def extra_repr(self):
-        return f'''
+        return f'''\
 Camera module...
-Refcative index for center wavelength: {refractive_index(self.buf_wavelengths[self.n_wavelengths // 2]):.3f}
-f number: {self.f_number:.3f}
-Depths: {list(map(lambda x: f'{x:.3f}', self.buf_scene_distances.numpy().tolist()))}
-Input image size: {self._image_size}
+Refcative index for design wavelength: {utils.refractive_index(self.design_wavelength):.3f}
+F number: {self.f_number:.3f}
+Input image size: {self.image_size}\
               '''
 
+    def register_buffer(self, name: str, tensor, persistent: bool = True) -> None:
+        if hasattr(self, name) and getattr(self, name) is ...:
+            delattr(self, name)
+        return super().register_buffer(name, tensor, persistent)
+
     def forward(self, img, depthmap, noise=True):
-        psf = self.psf_at_camera(img.shape[-2:], is_training=self.training).unsqueeze(0)
+        psf = self.final_psf(img.shape[-2:], is_training=self.training).unsqueeze(0)
         psf = self.normalize(psf)
-        captimg, volume = self.get_capt_img(img, depthmap, psf, self.__occlusion)
+        captimg, volume = self.get_capt_img(img, depthmap, psf, self.occlusion)
         if noise:
             captimg = self.apply_noise(captimg)
         return captimg, volume, psf
 
     def apply_noise(self, img):
-        dtype = img.dtype
-        device = img.device
-        n_min, n_max = self.__noise_sigma
-        noise_sigma = (n_max - n_min) * torch.rand((img.shape[0], 1, 1, 1), device=device, dtype=dtype) + n_min
+        kwargs = {'dtype': img.dtype, 'device': img.device}
+        n_min, n_max = self.noise_sigma
+        noise_sigma = (n_max - n_min) * torch.rand((img.shape[0], 1, 1, 1), **kwargs) + n_min
 
-        if not self.__bayer:
-            img = img + noise_sigma * torch.randn(img.shape, device=device, dtype=dtype)
+        if self.debayer is None:
+            img = img + noise_sigma * torch.randn(img.shape, **kwargs)
         else:
             captimgs_bayer = utils.to_bayer(img)
-            captimgs_bayer = captimgs_bayer + noise_sigma * torch.randn(
-                captimgs_bayer.shape, device=device, dtype=dtype
-            )
+            captimgs_bayer = captimgs_bayer + noise_sigma * torch.randn(captimgs_bayer.shape, **kwargs)
             img = self.debayer(captimgs_bayer)
         return img
 
     def get_capt_img(self, img, depthmap, psf, occlusion):
         with torch.no_grad():
-            layered_mask = _depthmap2layers(depthmap, self._n_depths, binary=True)
+            layered_mask = utils.depthmap2layers(depthmap, self.n_depths, binary=True)
             volume = layered_mask * img[:, :, None, ...]
         return algorithm.image.image_formation(volume, layered_mask, psf, occlusion)
 
-    def psf_at_camera(
+    def final_psf(
         self,
         size: typing.Tuple[int, int] = None,
         is_training: bool = False,
         use_psf_cache: bool = False
     ):
-        if use_psf_cache and self.__psf_cache is not None:
-            return utils.pad_or_crop(self.__psf_cache, size)
+        if use_psf_cache and not is_training and hasattr(self, 'psf_cache'):
+            return utils.pad_or_crop(self.psf_cache, size)
 
+        # PSF jitter
         device = self.device
-        init_sd = torch.linspace(0, 1, steps=self._n_depths, device=device)
+        init_sd = torch.linspace(0, 1, steps=self.n_depths, device=device)
         if is_training:
-            init_sd += (torch.rand(self._n_depths, device=device) - 0.5) / self._n_depths
-        scene_distances = utils.ips_to_metric(init_sd, self.__min_depth, self.__max_depth)
+            init_sd += (torch.rand(self.n_depths, device=device) - 0.5) / self.n_depths
+        scene_distances = utils.ips_to_metric(init_sd, self.min_depth, self.max_depth)
         if is_training:
-            scene_distances[-1] += torch.rand(1, device=device)[0] * (100.0 - self.__max_depth)
+            scene_distances[-1] += torch.rand(1, device=device)[0] * (100.0 - self.max_depth)
 
-        diffracted_psf = self.psf(scene_distances, True)
-        # Keep the normalization factor for penalty computation
-        self._diffraction_scaler = diffracted_psf.sum(dim=(-1, -2), keepdim=True)
-        diffracted_psf = diffracted_psf / self._diffraction_scaler
-        self.__psf_cache = \
-            self._diffraction_efficiency * diffracted_psf + \
-            (1 - self._diffraction_efficiency) * self.__undiffracted_psf()
+        dif_psf = self.normalize(self.psf(scene_distances, True))
+        undif_psf = self.undiffracted_psf()
+        psf = self.diffraction_efficiency * dif_psf + (1 - self.diffraction_efficiency) * undif_psf
 
         # In training, randomly pixel-shifts the PSF around green channel.
         if is_training:
             max_shift = 2
             r_shift = tuple(np.random.randint(low=-max_shift, high=max_shift, size=2))
             b_shift = tuple(np.random.randint(low=-max_shift, high=max_shift, size=2))
-            psf_r = torch.roll(self.__psf_cache[0], shifts=r_shift, dims=(-1, -2))
-            psf_g = self.__psf_cache[1]
-            psf_b = torch.roll(self.__psf_cache[2], shifts=b_shift, dims=(-1, -2))
-            self.__psf_cache = torch.stack([psf_r, psf_g, psf_b], dim=0)
+            psf_r = torch.roll(psf[0], shifts=r_shift, dims=(-1, -2))
+            psf_g = psf[1]
+            psf_b = torch.roll(psf[2], shifts=b_shift, dims=(-1, -2))
+            psf = torch.stack([psf_r, psf_g, psf_b], dim=0)
 
-        self.__psf_cache = utils.pad_or_crop(self.__psf_cache, size)
-        return self.__psf_cache
+        if hasattr(self, 'psf_cache'):
+            self.psf_cache.fill_(psf)
+        else:
+            self.register_buffer('psf_cache', psf, persistent=False)
+        return utils.pad_or_crop(self.psf_cache, size)
 
     def apply_stop(self, *args, **kwargs):
         return self.__applying_stop[self.aperture_type](*args, **kwargs)
@@ -244,20 +195,9 @@ Input image size: {self._image_size}
             f, torch.zeros_like(f)
         )
 
-    def mtf_loss(self, bounded=True, normalized=True):
-        mtf = self.mtf
-        if normalized:
-            mtf = self.normalize(mtf)
-        if bounded:
-            factor = self.buf_mtf_bound
-            while len(factor.shape) != len(mtf.shape):
-                factor = factor.unsqueeze(0)
-        else:
-            factor = 1
-
-        loss = factor / mtf
-        loss[torch.isinf(loss)] = 0
-        return torch.sum(loss)
+    def scale_coordinate(self, x):
+        x = x / self.aperture_diameter + 0.5
+        return torch.clamp(x, 0, 1)
 
     # logging method shuould be executed on cpu
 
@@ -269,73 +209,51 @@ Input image size: {self._image_size}
         return heightmap
 
     @torch.no_grad()
-    def psf_log(self, log_size, depth_step):
+    def psf_log(self, log_size, depth_step=1):
         # PSF is not visualized at computed size.
-        psf = self.psf_at_camera(log_size, is_training=False, use_psf_cache=True).cpu()
+        psf = self.final_psf(log_size, is_training=False, use_psf_cache=True).cpu()
         psf = self.normalize(psf)
         psf /= psf.max()
-        streched_psf = psf / psf \
-            .max(dim=-1, keepdim=True)[0] \
-            .max(dim=-2, keepdim=True)[0] \
-            .max(dim=0, keepdim=True)[0]
-        return self.__make_grid(psf, depth_step), self.__make_grid(streched_psf, depth_step)
+        streched_psf = psf / psf.amax(dim=(0, 2, 3), keepdim=True)
+        return self.make_grid(psf, depth_step), self.make_grid(streched_psf, depth_step)
 
     @torch.no_grad()
     def mtf_log(self, depth_step):
         mtf = self.mtf
         mtf /= mtf.max()
-        return self.__make_grid(mtf, depth_step)
+        return self.make_grid(mtf, depth_step)
 
     @torch.no_grad()
     def specific_log(self, *args, **kwargs):
-        if 'psf_expansion' not in self.__loss_items:
-            return {}
-
-        psf_loss = self.psf_out_energy(kwargs['psf_size'])
-        return {
-            'optics/psf_out_of_fov_energy': psf_loss[0],
-            'optics/psf_out_of_fov_max': psf_loss[1]
-        }
+        return {}
 
     @property
     def f_number(self):
-        return self.__focal_length / self.__aperture_diameter
+        return self.focal_length / self.aperture_diameter
+
+    @property
+    def min_depth(self):
+        return self.depth_range[0]
+
+    @property
+    def max_depth(self):
+        return self.depth_range[1]
 
     @property
     def sensor_distance(self):
-        return 1. / (1. / self.__focal_length - 1. / self.__focal_depth)
-
-    @property
-    def focal_depth(self):
-        return self.__focal_depth
-
-    @property
-    def focal_length(self):
-        return self.__focal_length
+        return 1. / (1. / self.focal_length - 1. / self.focal_depth)
 
     @property
     def slope_range(self):
-        return 2 * (self.__max_depth - self.__min_depth) / (self.__max_depth + self.__min_depth)
-
-    @property
-    def camera_pitch(self):
-        return self._camera_pitch
+        return 2 * (self.max_depth - self.min_depth) / (self.max_depth + self.min_depth)
 
     @property
     def n_wavelengths(self):
-        return len(self.buf_wavelengths)
-
-    @property
-    def aperture_diameter(self):
-        return self.__aperture_diameter
-
-    @property
-    def depth_range(self):
-        return self.__min_depth, self.__max_depth
+        return len(self.wavelengths)
 
     @property
     def otf(self):
-        psf = self.psf_at_camera(use_psf_cache=True)
+        psf = self.final_psf(use_psf_cache=True)
         return fft.fftshift(torch.rfft(psf, 2, onesided=False), (-2, -3))
 
     @property
@@ -344,15 +262,7 @@ Input image size: {self._image_size}
 
     @property
     def device(self):
-        return self.buf_wavelengths.device
-
-    @property
-    def loss_items(self):
-        return self.__loss_items
-
-    @property
-    def aperture_type(self):
-        return self.__aperture_type
+        return next(self.parameters()).device
 
     @classmethod
     def add_specific_args(cls, parser):
@@ -414,7 +324,6 @@ Input image size: {self._image_size}
             'camera_pitch': kwargs['camera_pixel_pitch'],
             'aperture_diameter': kwargs['focal_length'] / kwargs['f_number'],
             'requires_grad': kwargs['optimize_optics'],
-            'loss_items': kwargs['loss_items'] or (),
             'init_type': kwargs['initialization_type'],
             'noise_sigma': (kwargs['noise_sigma_min'], kwargs['noise_sigma_max'])
         }
@@ -425,35 +334,15 @@ Input image size: {self._image_size}
             params[k] = kwargs[k]
         return params
 
-    def _scale_coordinate(self, x):
-        x = x / self.aperture_diameter + 0.5
-        return torch.clamp(x, 0, 1)
-
-    def __register_wavlength(self, wavelengths):
-        if isinstance(wavelengths, tuple):
-            wavelengths = torch.tensor(wavelengths)
-        elif isinstance(wavelengths, float):
-            wavelengths = torch.tensor([wavelengths])
-        else:
-            raise ValueError(f'Wrong wavelength type({wavelengths})')
-
-        if len(wavelengths) % 3 != 0:
-            raise ValueError('the number of wavelengths has to be a multiple of 3.')
-
-        if not hasattr(self, 'buf_wavelengths'):
-            self.register_buffer('buf_wavelengths', wavelengths, persistent=False)
-        else:
-            self.buf_wavelengths = wavelengths.to(self.buf_wavelengths.device)
-
     @torch.no_grad()
-    def __undiffracted_psf(self):
-        if not hasattr(self, 'buf_undiffracted_psf'):
-            self.register_buffer('buf_undiffracted_psf', self.psf(self.buf_scene_distances, False), persistent=False)
-            self.buf_undiffracted_psf /= self.buf_undiffracted_psf.sum(dim=(-1, -2), keepdim=True)
-        return self.buf_undiffracted_psf
+    def undiffracted_psf(self):
+        if not hasattr(self, 'undiff_psf'):
+            ud = self.psf(self.scene_distances, False)
+            self.register_buffer('undiff_psf', self.normalize(ud), persistent=False)
+        return self.undiff_psf
 
     @staticmethod
-    def __make_grid(image, depth_step):
+    def make_grid(image, depth_step):
         # expect image with shape CxDxHxW
         return torchvision.utils.make_grid(
             image[:, ::depth_step].transpose(0, 1),
@@ -461,14 +350,14 @@ Input image size: {self._image_size}
         )
 
     @staticmethod
-    def normalize(psf):
+    def normalize(psf: torch.Tensor):
         return psf / psf.sum(dim=(-2, -1), keepdims=True)
 
     @staticmethod
     def regularize_image_size(img_sz):
         if isinstance(img_sz, int):
             img_sz = [img_sz, img_sz]
-        elif isinstance(img_sz, list):
+        elif isinstance(img_sz, (list, tuple)):
             if img_sz[0] % 2 == 1 or img_sz[1] % 2 == 1:
                 raise ValueError('Image size has to be even.')
         else:

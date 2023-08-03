@@ -33,7 +33,7 @@ def _copy_quadruple(x_rd):
     return x
 
 
-class RotationallySymmetricCamera(optics.base.Camera):
+class RotationallySymmetricCamera(optics.base.DOECamera):
     def __init__(
         self,
         aperture_size: int,
@@ -66,28 +66,10 @@ class RotationallySymmetricCamera(optics.base.Camera):
             self.buf_rho_grid, psf1d, self.buf_rho_sampling, self.buf_ind
         ).float())
         psf_rd = psf_rd.reshape(
-            self.n_wavelengths, self._n_depths,
-            self._image_size[0] // 2, self._image_size[1] // 2
+            self.n_wavelengths, self.n_depths,
+            self.image_size[0] // 2, self.image_size[1] // 2
         )
         return _copy_quadruple(psf_rd)
-
-    def psf_out_energy(self, psf_size: int):
-        """This can be run only after psf_at_camera is evaluated once."""
-        device = self.buf_h.device
-        scene_distances = utils.ips_to_metric(
-            torch.linspace(0, 1, steps=self._n_depths, device=device),
-            *self.depth_range
-        )
-        psf1d_diffracted = self.__psf1d(self.buf_h_full, scene_distances, torch.tensor(True))
-        # Normalize PSF based on the cropped PSF
-        psf1d_diffracted = psf1d_diffracted / self._diffraction_scaler.squeeze(-1)
-        edge = \
-            psf_size / 2 * \
-            self._camera_pitch / \
-            (self.buf_wavelengths.reshape(-1, 1, 1) * self.sensor_distance)
-        psf1d_out_of_fov = \
-            psf1d_diffracted * (self.buf_rho_grid_full.unsqueeze(1) > edge).float()
-        return psf1d_out_of_fov.sum(), psf1d_out_of_fov.max()
 
     def heightmap(self):
         heightmap1d = torch.cat([
@@ -105,7 +87,7 @@ class RotationallySymmetricCamera(optics.base.Camera):
 
     def aberration(self, u, v, wavelength=None):
         if wavelength is None:
-            wavelength = self.buf_wavelengths[len(self.buf_wavelengths) / 2]
+            wavelength = self.wavelengths[len(self.wavelengths) / 2]
         profile = self.heightmap1d
 
         r2 = u ** 2 + v ** 2
@@ -114,7 +96,7 @@ class RotationallySymmetricCamera(optics.base.Camera):
         index = index.to(dtype=torch.int64)
         h = profile[index]
 
-        phase = optics.heightmap2phase(h, wavelength, optics.refractive_index(wavelength))
+        phase = utils.heightmap2phase(h, wavelength, utils.refractive_index(wavelength))
         return self.apply_stop(fft.exp2xy(1, phase), r2=torch.stack([r2, r2], -1))
 
     def specific_log(self, *args, **kwargs):
@@ -166,7 +148,7 @@ class RotationallySymmetricCamera(optics.base.Camera):
         )
 
     def __build_camera(self):
-        h, rho_grid, rho_sampling = self.__precompute_h(self._image_size)
+        h, rho_grid, rho_sampling = self.__precompute_h(self.image_size)
         ind = _find_index(rho_grid, rho_sampling)
 
         h_full, rho_grid_full, rho_sampling_full = self.__precompute_h(self.__full_size)
@@ -199,18 +181,18 @@ class RotationallySymmetricCamera(optics.base.Camera):
         Therefore, the mask_size has to be sufficiently large.
         """
         # As this quadruple will be copied to the other three, zero is avoided.
-        coord_y = self._camera_pitch * torch.arange(1, img_size[0] // 2 + 1).reshape(-1, 1)
-        coord_x = self._camera_pitch * torch.arange(1, img_size[1] // 2 + 1).reshape(1, -1)
+        coord_y = self.camera_pitch * torch.arange(1, img_size[0] // 2 + 1).reshape(-1, 1)
+        coord_x = self.camera_pitch * torch.arange(1, img_size[1] // 2 + 1).reshape(1, -1)
         rho_sampling = torch.sqrt(coord_y ** 2 + coord_x ** 2)
 
         # Avoiding zero as the numerical derivative is not good at zero
         # sqrt(2) is for finding the diagonal of FoV.
-        rho_grid = math.sqrt(2) * self._camera_pitch * (
+        rho_grid = math.sqrt(2) * self.camera_pitch * (
             torch.arange(-1, max(img_size) // 2 + 1, dtype=torch.double) + 0.5
         )
 
         # n_wl x 1 x n_rho_grid
-        factor = 1 / (self.buf_wavelengths.reshape(-1, 1, 1) * self.sensor_distance)
+        factor = 1 / (self.wavelengths.reshape(-1, 1, 1) * self.sensor_distance)
         rho_grid = rho_grid.reshape(1, 1, -1) * factor
         # n_wl X (image_size[0]//2 + 1) X (image_size[1]//2 + 1)
         rho_sampling = rho_sampling.unsqueeze(0) * factor
@@ -231,13 +213,13 @@ class RotationallySymmetricCamera(optics.base.Camera):
         prop_amplitude, prop_phase = self.__pointsource_inputfield1d(scene_distances)
 
         h = h.unsqueeze(1)  # n_wl x 1 x n_r x n_rho
-        wavelengths = self.buf_wavelengths.reshape(-1, 1, 1).double()
+        wavelengths = self.wavelengths.reshape(-1, 1, 1).double()
         phase = prop_phase
         if modulate_phase:
-            phase += optics.heightmap2phase(
+            phase += utils.heightmap2phase(
                 self.heightmap1d.reshape(1, -1),  # add wavelength dim
                 wavelengths,
-                optics.refractive_index(wavelengths)
+                utils.refractive_index(wavelengths)
             )
 
         # broadcast the matrix-vector multiplication
@@ -254,7 +236,7 @@ class RotationallySymmetricCamera(optics.base.Camera):
             1, self.__aperture_size / 2, self.__aperture_size // 2, device=device
         ).double()
         # compute pupil function
-        wavelengths = self.buf_wavelengths.reshape(-1, 1, 1).double()
+        wavelengths = self.wavelengths.reshape(-1, 1, 1).double()
         scene_distances = scene_distances.reshape(1, -1, 1).double()  # 1 x D x 1
         r = r.reshape(1, 1, -1)
         wave_number = 2 * math.pi / wavelengths

@@ -2,23 +2,37 @@ import shutup
 
 shutup.please()  # shield Pillow warning
 
-import os
 import argparse
 import functools
 import multiprocessing as mp
 
-import torch
 import torch.utils.data as data
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from dataset import *
-from model.snapshotdepth import SnapshotDepth
+from model.system import RGBDImagingSystem
 from utils.log import LogManager
+import utils
 
 pl.seed_everything(123)
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
+
+
+def add_training_args(parser):
+    parser = argparse.ArgumentParser(parents=[parser], add_help=False)
+
+    utils.add_switch(parser, 'randcrop', False, '')
+    utils.add_switch(parser, 'augment', False, '')
+    parser.add_argument('--batch_sz', type=int, default=64)
+    parser.add_argument('--num_workers', type=int, default=8)
+    parser.add_argument('--experiment_name', type=str, default='ExtendedDOF')
+    parser.add_argument('--last_checkpoint', type=str, default='')
+    parser.add_argument('--save_top', type=int, default=5)
+    utils.add_switch(parser, 'mix_dualpixel_dataset', False, '')
+
+    return parser
 
 
 def prepare_data(hparams):
@@ -61,6 +75,7 @@ def prepare_data(hparams):
         train_dataset = data.ConcatDataset([dp_train_dataset, sf_train_dataset])
         val_dataset = data.ConcatDataset([dp_val_dataset, sf_val_dataset])
 
+        # sample with same probability
         n_sf = len(sf_train_dataset)
         n_dp = len(dp_train_dataset)
         sample_weights = torch.cat([
@@ -81,26 +96,28 @@ def prepare_data(hparams):
 
 
 def main(args):
-    logger = TensorBoardLogger(args.default_root_dir, name=args.experiment_name)
+    logger = TensorBoardLogger(args.default_root_dir, name=args.experiment_name, default_hp_metric=False)
 
     logmanager_callback = LogManager(args.last_checkpoint)
+    lr_log_callback = LearningRateMonitor()
 
     checkpoint_callback = ModelCheckpoint(
         verbose=True,
         monitor='validation/val_loss',
-        filepath=os.path.join(logger.log_dir, 'model'),
+        filepath=os.path.join(logger.log_dir, 'model-{epoch:02d}'),
+        save_last=True,
         save_top_k=args.save_top,
         period=1,
         mode='min',
     )
 
-    model = SnapshotDepth(hparams=args, log_dir=logger.log_dir)
-    train_dataloader, val_dataloader = prepare_data(hparams=args)
+    model = RGBDImagingSystem(hparams=args, log_dir=logger.log_dir)
+    train_dataloader, val_dataloader = prepare_data(args)
 
     trainer = pl.Trainer.from_argparse_args(
         args,
         logger=logger,
-        callbacks=[logmanager_callback],
+        callbacks=[logmanager_callback, lr_log_callback],
         checkpoint_callback=checkpoint_callback,
         sync_batchnorm=True,
         benchmark=True,
@@ -110,24 +127,17 @@ def main(args):
 
 if __name__ == '__main__':
     mp.set_start_method('spawn')  # bug fix
+
     parser = argparse.ArgumentParser(
         usage='python %(prog)s camera_type estimator_type [options]'
     )
-
-    parser.add_argument('--experiment_name', type=str, default='ExtendedDOF')
-    parser.add_argument('--mix_dualpixel_dataset', dest='mix_dualpixel_dataset', action='store_true')
-    parser.add_argument('--last_checkpoint', type=str, default='')
-    parser.add_argument('--save_top', type=int, default=5)
-
     parser = pl.Trainer.add_argparse_args(parser)
-    parser = SnapshotDepth.add_model_specific_args(parser)
-
+    parser = RGBDImagingSystem.add_model_specific_args(parser)
+    parser = add_training_args(parser)
     parser.set_defaults(
         gpus=1,
         default_root_dir='log',
         max_epochs=100,
     )
 
-    args = parser.parse_args()
-
-    main(args)
+    main(parser.parse_args())

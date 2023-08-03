@@ -1,13 +1,12 @@
 import typing
-from typing import Union, Dict
 
 import torch
 import torch.nn
-from torch import Tensor
 
 import algorithm
 import optics.classic
 import algorithm.zernike as z
+import utils
 import utils.fft as fft
 
 
@@ -23,7 +22,8 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
         super().__init__(**kwargs)
 
         linear = (degree + 1) * (degree + 2) // 2
-        self.__degree = degree
+        self.degree = degree
+        self.mat: torch.Tensor = ...
 
         if init_type == 'lattice_focal':
             init = self.lattice_focal_init()
@@ -32,27 +32,25 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
         if init is not None:
             self.zernike_coefficients = torch.nn.Parameter(init, requires_grad=requires_grad)
 
-        r = torch.sqrt(self.buf_r_sqr) / (self.aperture_diameter / 2)  # n_wl x N_u x N_v
+        r = torch.sqrt(self.r2) / (self.aperture_diameter / 2)  # n_wl x N_u x N_v
         r = torch.clamp(r, 0, 1)
-        t = torch.atan2(self.v_axis, self.u_axis)
-        self.register_buffer('buf_mat', z.make_matrix(r, t, self.__degree), persistent=False)
+        t = torch.atan2(self.v_grid, self.u_grid)
+        self.register_buffer('mat', z.make_matrix(r, t, self.degree), persistent=False)
 
-    def psf_out_energy(self, psf_size: int):
-        return 0, 0  # todo
-
-    def compute_heightmap(self):
-        return z.fit_with_matrix(
-            self.buf_mat,
+    def heightmap(self):
+        h = z.fit_with_matrix(
+            self.mat,
             self.zernike_coefficients[None, ..., None],
-            self.buf_r_sqr.shape[-2:]
+            self.r2.shape[-2:]
         )
+        return utils.fold_profile(h, self.design_wavelength)
 
     def lattice_focal_init(self):
         u = torch.linspace(-1, 1, 256)[None, ...]
         v = torch.linspace(-1, 1, 256)[..., None]
         r = torch.sqrt(u ** 2 + v ** 2)
         t = torch.atan2(v, u)
-        mat = z.make_matrix(r, t, self.__degree)
+        mat = z.make_matrix(r, t, self.degree)
 
         u *= self.aperture_diameter / 2
         v *= self.aperture_diameter / 2
@@ -66,7 +64,7 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
 
     def aberration(self, u, v, wavelength=None):
         if wavelength is None:
-            wavelength = self.buf_wavelengths[len(self.buf_wavelengths) / 2]
+            wavelength = self.wavelengths[len(self.wavelengths) / 2]
         c = self.zernike_coefficients.cpu()[None, None, :, None]
 
         v = torch.flip(v, (3,))
@@ -74,10 +72,11 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
         r = torch.sqrt(r2) / (self.aperture_diameter / 2)
         r = torch.clamp(r, 0, 1)
         t = torch.atan2(v, u)
-        m = z.make_matrix(r, t, self.__degree)
+        m = z.make_matrix(r, t, self.degree)
         h = z.fit_with_matrix(m, c, r.shape[-2:])
+        h = utils.fold_profile(h, self.design_wavelength)
 
-        phase = optics.heightmap2phase(h, wavelength, optics.refractive_index(wavelength))
+        phase = utils.heightmap2phase(h, wavelength, utils.refractive_index(wavelength))
         return self.apply_stop(fft.exp2xy(1, phase), r2=torch.stack([r2, r2], -1))
 
     @torch.no_grad()
@@ -86,7 +85,8 @@ class ZernikeApertureCamera(optics.classic.ClassicCamera):
         v = torch.linspace(-1, 1, size[0])[:, None]
         r = torch.sqrt(u ** 2 + v ** 2)
         t = torch.atan2(v, u)
-        h = z.fit_with_matrix(z.make_matrix(r, t, self.__degree), self.zernike_coefficients.cpu()[:, None])
+        h = z.fit_with_matrix(z.make_matrix(r, t, self.degree), self.zernike_coefficients.cpu()[:, None])
+        h = utils.fold_profile(h, self.design_wavelength)
         h = torch.reshape(h, size)
         h -= h.min()
         h /= h.max()

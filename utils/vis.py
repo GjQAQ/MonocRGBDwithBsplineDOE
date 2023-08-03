@@ -63,14 +63,27 @@ def __save_or_show(fig, path, filename):
         fig.savefig(os.path.join(path, filename))
 
 
+def __plot_with_text(img, text, fontcolor):
+    h, w = img.shape[-2:]
+    fig, ax = __compact_layout((w, h))
+    ax.imshow(img.detach().permute(1, 2, 0).squeeze(), cmap='inferno')
+    ax.text(
+        1, 0, text,
+        ha='right', va='bottom', transform=ax.transAxes,
+        color=fontcolor,
+        fontsize=h // 16
+    )
+    return fig
+
+
 def __plot_diff(diff, vmin, vmax, permute=False):
     h, w = diff.shape[-2:]
     if permute:
         diff = diff.permute(1, 2, 0)
     fig, ax = __compact_layout((w, h), False)
-    aximg = ax.imshow(diff, vmin=vmin, vmax=vmax)
-    fig.colorbar(aximg, location='bottom', orientation='horizontal')
-    fig.show()
+    aximg = ax.imshow(diff, vmin=vmin, vmax=vmax, cmap='inferno')
+    fig.colorbar(aximg, location='bottom', orientation='horizontal', shrink=0.5)
+    return fig
 
 
 def inspect_samples(
@@ -79,10 +92,8 @@ def inspect_samples(
     labels: str,
     show_diff=False,
     saving_path: str = None,
-    color=(0, 0, 0),
-    image_size=512,
-    padding=128,
-    device='cpu'
+    device='cpu',
+    **kwargs
 ):
     """
     Save or display the GT, estimated (with metrics) and captured image of a single sample (in SceneFlow).
@@ -91,16 +102,16 @@ def inspect_samples(
     :param labels: A name to specify the model.
     :param show_diff: Whether to show the difference between prediction and GT as well.
     :param saving_path: Path where resulted figure will be saved. Displaying figure if None specified.
-    :param color: Font color.
-    :param image_size:
-    :param padding:
     :param device:
     :return: None
     """
     if saving_path is not None:
         saving_path = os.path.join(saving_path, labels, str(index))
+    color = kwargs.get('color', (0, 0, 0))
+    image_size = kwargs.get('image_size', 512)
+    padding = kwargs.get('padding', 128)
 
-    metrics, [imgs] = utils.eval_checkpoint(
+    metrics, [output] = utils.eval_checkpoint(
         ('img_psnr', 'depth_mae'),
         ckpt_path,
         device=device,
@@ -116,24 +127,28 @@ def inspect_samples(
     annotation = (None, None, f'PSNR={metrics[0]:.3g}', None, f'MAE=${metrics[1]:.3g}m$')
     tag = ('capt_img', 'target_img', 'est_img', 'target_depthmap', 'est_depthmap')
     for i in range(len(tag)):
-        img = getattr(imgs, tag[i])
-        h, w = img.shape[-2:]
-        fig, ax = __compact_layout((w, h))
-
-        ax.imshow(img[0].detach().permute(1, 2, 0).squeeze(), cmap='inferno')
-        ax.text(
-            1, 0, annotation[i],
-            ha='right', va='bottom', transform=ax.transAxes,
-            color=color,
-            fontsize=h // 16
-        )
+        img = getattr(output, tag[i])
+        fig = __plot_with_text(img[0], annotation[i], color)
         __save_or_show(fig, saving_path, f'{index}-{tag[i]}.png')
 
     if show_diff:
-        img_diff = torch.abs(imgs.est_img - imgs.target_img)
-        depth_diff = torch.abs(imgs.est_depthmap - imgs.target_depthmap)
-        __plot_diff(img_diff.squeeze(), 0, 0.1, True)
-        __plot_diff(depth_diff.squeeze(), 0, 0.5)
+        img_diff = torch.abs(output.est_img - output.target_img)[0]
+        img_diff = torch.clamp(img_diff / 0.1, 0, 1)
+        h, w = img_diff.shape[-2:]
+        fig, ax = __compact_layout((w, h))
+        ax.imshow(img_diff.permute(1, 2, 0))
+        __save_or_show(fig, saving_path, f'{index}-rgbdiff.png')
+
+        depth_diff = torch.abs(output.est_depthmap - output.target_depthmap)
+        fig = __plot_diff(depth_diff.squeeze(), 0, 0.5)
+        __save_or_show(fig, saving_path, f'{index}-depthdiff.png')
+
+        # fig, axs = plt.subplots(1, 3, figsize=(10.8, 4.8))
+        # for i, ch in enumerate('RGB'):
+        #     img_ch = img_diff[i]
+        #     axs[i].scatter(output.target_depthmap.flatten(), img_ch.flatten(), s=0.2)
+        #     axs[i].set_title(f'{ch} Difference w.r.t. Depth')
+        # __save_or_show(fig, saving_path, f'{index}-rgbdiffdist.png')
 
 
 def plot_spectrum(spectrum, label: str, saving_path=None, **kwargs):
@@ -173,7 +188,7 @@ def plot_spectrum(spectrum, label: str, saving_path=None, **kwargs):
 
     for y in range(nrows):
         for x in range(ncols):
-            axs[y][x].imshow(spectrum[y][x], cmap='gray')
+            axs[y][x].imshow(spectrum[nrows - y - 1][x], cmap='gray')
 
     __save_or_show(fig, saving_path, label + '.png')
 
@@ -299,7 +314,7 @@ def plot_psf(
     :param saving_path:
     :return:
     """
-    psf = camera.psf_at_camera(size, is_training=False)
+    psf = camera.final_psf(size, is_training=False)
     psf = camera.normalize(psf)
     psf = psf / psf.max(dim=-1, keepdim=True)[0].max(dim=-2, keepdim=True)[0].max(dim=0, keepdim=True)[0]
     psf /= psf.max()

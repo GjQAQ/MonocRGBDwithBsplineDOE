@@ -1,6 +1,6 @@
 import torch
 
-import optics
+import utils
 
 
 def __index(u, diameter, n):
@@ -19,7 +19,7 @@ def slope2height(
     var_depth = d / (1 - slopemap)
     var_focal_length = var_depth * sensor_d / (var_depth + sensor_d)
     sub_focal_length = var_focal_length * f / (f - var_focal_length)
-    roc = (optics.refractive_index(wl) - 1) * sub_focal_length
+    roc = (utils.refractive_index(wl) - 1) * sub_focal_length
     if center == 'concentric':
         heightmap = torch.sqrt(roc.double() ** 2 - r2.double())
     elif center == 'random':

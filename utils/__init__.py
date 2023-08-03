@@ -1,3 +1,4 @@
+from .optics import *
 from .misc import *
 from .log import *
 from .vis import *

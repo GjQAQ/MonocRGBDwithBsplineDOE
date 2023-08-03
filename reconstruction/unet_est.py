@@ -1,5 +1,5 @@
 import collections
-import typing
+from typing import Union, List, Tuple, Dict
 
 import torch
 import torch.nn as nn
@@ -13,21 +13,14 @@ class UNetBased(EstimatorBase):
 
     def __init__(
         self,
-        n_depth: int = 16,
-        estimate_depth=True,
-        estimate_image=True
+        n_depth: int,
+        channels: Union[Tuple[int, ...], List[int]]
     ):
-        if not (estimate_depth or estimate_image):
-            raise ValueError(f'Reconstructor estimates nothing.')
 
         super().__init__()
-        self._depth = estimate_depth
-        self._image = estimate_image
-
-        self.__bulk_training = True
         ch_pin = 3 * (n_depth + 1)
-        ch_base = 32
-        ch_out = 3 * int(estimate_image) + 1 * int(estimate_depth)
+        ch_base = channels[0]
+        ch_out = 4
 
         input_layer = nn.Sequential(
             nn.Conv2d(ch_pin, ch_pin, kernel_size=3, padding=1, bias=False),
@@ -38,11 +31,10 @@ class UNetBased(EstimatorBase):
             nn.ReLU()
         )
 
-        output_blocks = [nn.Conv2d(32, ch_out, kernel_size=1, bias=True)]
-        output_layer = nn.Sequential(*output_blocks)
+        output_layer = nn.Conv2d(channels[1], ch_out, kernel_size=1, bias=True)
         self.decoder = nn.Sequential(
             input_layer,
-            UNet([ch_base, 32, 64, 64, 128]),
+            UNet(channels),
             output_layer,
         )
 
@@ -55,9 +47,9 @@ class UNetBased(EstimatorBase):
         est = self.decoder(inputs.reshape(b, -1, h, w))
         est = torch.sigmoid(est)
 
-        img = est[:, :-1] if self._image else utils.linear_to_srgb(capt_img)
-        depth = est[:, [-1]] if self._depth else torch.zeros(b, 1, h, w)
-        return ReconstructionOutput(img, depth)
+        img = est[:, :-1]
+        depth = est[:, [-1]]
+        return ReconstructionOutput(utils.linear_to_srgb(img), depth)
 
     def load_state_dict(self, state_dict, strict: bool = True):
         ks = list(filter(lambda k: '_Reconstructor__decoder' in k, state_dict.keys()))
@@ -68,9 +60,14 @@ class UNetBased(EstimatorBase):
         return super().load_state_dict(state_dict, strict)
 
     @classmethod
-    def extract_parameters(cls, kwargs) -> typing.Dict:
+    def add_specific_args(cls, parser):
+        parser = super().add_specific_args(parser)
+        parser.add_argument('--unet_channels', type=int, nargs='+', default=None)
+        return parser
+
+    @classmethod
+    def extract_parameters(cls, kwargs) -> Dict:
         return {
             'n_depth': kwargs['n_depths'],
-            'estimate_depth': True,
-            'estimate_image': True
+            'channels': kwargs['unet_channels'] or (32, 32, 64, 64, 128)
         }

@@ -2,7 +2,6 @@ import sys
 import typing
 import collections
 import argparse
-import json
 
 import pytorch_lightning as pl
 import pytorch_lightning.metrics.regression as regression
@@ -19,7 +18,6 @@ import utils
 import algorithm.inverse as inverse
 import optics
 
-
 FinalOutput = collections.namedtuple(
     'FinalOutput',
     ['capt_img', 'capt_linear', 'est_img', 'est_depthmap', 'target_img', 'target_depthmap', 'psf']
@@ -30,54 +28,63 @@ def _gray_to_rgb(x):
     return x.repeat(1, 3, 1, 1)
 
 
-class SnapshotDepth(pl.LightningModule):
+class RGBDImagingSystem(pl.LightningModule):
 
-    def __init__(self, hparams, log_dir=None, print_info=True):
+    def __init__(self, hparams, log_dir=None, print_info=True, init=True):
         super().__init__()
         self.hparams = hparams
         self.save_hyperparameters(self.hparams)
         hparams = self.hparams
 
         self.__metrics = {
-            'depth_loss': regression.MeanAbsoluteError(),
-            'image_loss': regression.MeanAbsoluteError(),
             'mae_depthmap': regression.MeanAbsoluteError(),
             'mse_depthmap': regression.MeanSquaredError(),
             'mae_image': regression.MeanAbsoluteError(),
             'mse_image': regression.MeanSquaredError(),
-            'vgg_image': regression.MeanAbsoluteError(),
+            'vgg_image': Vgg16PerceptualLoss().eval(),
         }
         self.__loss_weights = [
             hparams.depth_loss_weight,
-            hparams.image_loss_weight,
-            hparams.psf_expansion_loss_weight,
-            hparams.mtf_loss_weight
+            hparams.image_loss_weight
         ]
 
-        self.log_dir = log_dir
         self.crop_width = hparams.crop_width
 
-        self.decoder = reco.construct_model(hparams.estimator_type)
-        if hparams.init_cnn:
-            ckpt, _ = utils.compatible_load(hparams.init_cnn)
+        self.decoder = reco.construct_model(hparams.estimator_type, hparams)
+        if init and hparams.init_network:
+            ckpt, _ = utils.compatible_load(hparams.init_network)
             self.decoder.load_state_dict(utils.submodule_state_dict('decoder.', ckpt['state_dict']))
 
         self.camera = optics.construct_camera(hparams.camera_type, hparams)
-        if hparams.init_optics:
+        if init and hparams.init_optics:
             ckpt, _ = utils.compatible_load(hparams.init_optics)
             self.camera.load_state_dict(utils.submodule_state_dict('camera.', ckpt['state_dict']))
 
-        self.image_lossfn = Vgg16PerceptualLoss()
+        self.image_lossfn = Vgg16PerceptualLoss().train()
         self.depth_lossfn = torch.nn.L1Loss()
 
         if print_info:
             print(self.camera)
 
     def configure_optimizers(self):
-        return optim.Adam([
-            {'params': self.camera.parameters(), 'lr': self.hparams.optics_lr},
-            {'params': self.decoder.parameters(), 'lr': self.hparams.cnn_lr},
-        ])
+        pgs = [{'params': self.decoder.parameters(), 'lr': self.hparams.network_lr}]
+        if self.hparams.optimize_optics:
+            pgs += [{'params': self.camera.parameters(), 'lr': self.hparams.optics_lr}]
+
+        optimizer = optim.Adam(pgs)
+
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, factor=0.1, patience=5, verbose=True, cooldown=5, min_lr=1e-6
+        )
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': {
+                'scheduler': scheduler,
+                'interval': 'epoch',
+                'monitor': 'validation/val_loss',
+                'name': 'learning_rate'
+            }
+        }
 
     def optimizer_step(
         self,
@@ -90,15 +97,12 @@ class SnapshotDepth(pl.LightningModule):
         using_native_amp: bool = False,
         using_lbfgs: bool = False,
     ) -> None:
-        hp = self.hparams
+        # hp = self.hparams
         # warm up lr
-        if self.trainer.global_step < 4000:
-            lr_scale = float(self.trainer.global_step + 1) / 4000.
-            optimizer.param_groups[0]['lr'] = lr_scale * hp.optics_lr
-            optimizer.param_groups[1]['lr'] = lr_scale * hp.cnn_lr
-
-        if epoch >= hp.lr_decay_since and (epoch - hp.lr_decay_since) % hp.lr_decay_every == 0 and batch_idx == 0:
-            optimizer.param_groups[1]['lr'] *= hp.lr_decay_factor
+        # if self.trainer.global_step < 4000:
+        #     lr_scale = float(self.trainer.global_step + 1) / 4000.
+        #     optimizer.param_groups[0]['lr'] = lr_scale * hp.optics_lr
+        #     optimizer.param_groups[1]['lr'] = lr_scale * hp.network_lr
 
         optimizer.step()
         optimizer.zero_grad()
@@ -129,7 +133,6 @@ class SnapshotDepth(pl.LightningModule):
             elif item.endswith('image'):
                 loss(*img_pair)
                 self.log(f'validation/{item}', loss, on_step=False, on_epoch=True)
-        self.__metrics['vgg_image'](*img_pair)
 
         if batch_idx == 0:
             self.__log_images(output, 'validation')
@@ -141,10 +144,8 @@ class SnapshotDepth(pl.LightningModule):
 
     def validation_epoch_end(self, outputs):
         val_loss = self.__combine_loss(
-            self.__metrics['mae_depthmap'].compute() if self.decoder.estimating_depth else 0,
-            self.__metrics['vgg_image'].compute() if self.decoder.estimating_image else 0,
-            0.,
-            0.
+            self.__metrics['mae_depthmap'].compute(),
+            self.__metrics['mae_image'].compute()
         )
         self.log('validation/val_loss', val_loss)
 
@@ -187,7 +188,7 @@ class SnapshotDepth(pl.LightningModule):
         img_linear = utils.srgb_to_linear(img)
 
         captimgs, _, _ = self.camera(img_linear, depthmap)
-        psf = self.camera.psf_at_camera().unsqueeze(0)
+        psf = self.camera.final_psf().unsqueeze(0)
 
         # Crop the boundary artifact of DFT-based convolution
         captimgs = utils.crop_boundary(captimgs, self.crop_width)
@@ -212,22 +213,14 @@ class SnapshotDepth(pl.LightningModule):
         return outputs._replace(est_depthmap=est, target_depthmap=target), depth_conf
 
     def __compute_loss(self, output: FinalOutput, depth_conf):
-        hparams = self.hparams
+        depth_loss = self.depth_lossfn(output.est_depthmap * depth_conf, output.target_depthmap * depth_conf)
+        image_loss = self.image_lossfn(output.est_img, output.target_img)
 
-        depth_loss = self.depth_lossfn(
-            output.est_depthmap * depth_conf, output.target_depthmap * depth_conf
-        )
-        image_loss = self.image_lossfn.train_loss(output.est_img, output.target_img)
-        psf_out_of_fov_sum, psf_out_of_fov_max = self.camera.psf_out_energy(hparams.psf_size)
-        mtf_loss = self.camera.mtf_loss()
-
-        total_loss = self.__combine_loss(depth_loss, image_loss, psf_out_of_fov_sum, mtf_loss)
+        total_loss = self.__combine_loss(depth_loss, image_loss)
         logs = {
             'total_loss': total_loss,
             'depth_loss': depth_loss,
             'image_loss': image_loss,
-            'psf_expansion_loss': psf_out_of_fov_sum,
-            'mtf_loss': mtf_loss
         }
         return total_loss, logs
 
@@ -296,7 +289,7 @@ class SnapshotDepth(pl.LightningModule):
         parser.add_argument('--summary_track_train_every', type=int, default=4000)
 
         # learning rate scheduling parameters
-        parser.add_argument('--cnn_lr', type=float, default=1e-3)
+        parser.add_argument('--network_lr', type=float, default=1e-3)
         parser.add_argument('--optics_lr', type=float, default=1e-9)
         parser.add_argument('--lr_decay_since', type=int, default=40)
         parser.add_argument('--lr_decay_every', type=int, default=10)
@@ -305,22 +298,13 @@ class SnapshotDepth(pl.LightningModule):
         # loss related
         parser.add_argument('--depth_loss_weight', type=float, default=1)
         parser.add_argument('--image_loss_weight', type=float, default=0.1)
-        parser.add_argument('--psf_expansion_loss_weight', type=float, default=1)
-        parser.add_argument('--mtf_loss_weight', type=float, default=1)
-        parser.add_argument('--loss_items', nargs='*')
 
         # module initialization options
         parser.add_argument('--init_optics', default='')
-        parser.add_argument('--init_cnn', default='')
-
-        # data augmentation
-        utils.add_switch(parser, 'randcrop', False, '')
-        utils.add_switch(parser, 'augment', False, '')
+        parser.add_argument('--init_network', default='')
 
         # others
-        parser.add_argument('--batch_sz', type=int, default=64)
         parser.add_argument('--reg_tikhonov', type=float, default=1)
-        parser.add_argument('--num_workers', type=int, default=8)
 
         ctype = sys.argv[1]
         etype = sys.argv[2]
@@ -332,6 +316,6 @@ class SnapshotDepth(pl.LightningModule):
     @staticmethod
     def construct_from_checkpoint(ckpt, print_info=False):
         hparams = ckpt['hyper_parameters']
-        model = SnapshotDepth(hparams, print_info=print_info)
+        model = RGBDImagingSystem(hparams, print_info=print_info, init=False)
         model.load_state_dict(ckpt['state_dict'])
         return model

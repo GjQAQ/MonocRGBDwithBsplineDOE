@@ -35,22 +35,9 @@ class EstimatorBase(nn.Module):
         2. Estimated depthmap (B x 1 x H x W)
     """
 
-    def __init__(self):
-        super().__init__()
-        self._depth = False
-        self._image = False
-
     @abc.abstractmethod
     def forward(self, capt_img, pin_volume) -> ReconstructionOutput:
         pass
-
-    @property
-    def estimating_depth(self) -> bool:
-        return self._depth
-
-    @property
-    def estimating_image(self) -> bool:
-        return self._image
 
     @classmethod
     def extract_parameters(cls, kwargs) -> typing.Dict:
@@ -64,12 +51,3 @@ class EstimatorBase(nn.Module):
     @classmethod
     def add_specific_args(cls, parser):
         return parser
-
-
-class DepthOnlyWrapper(nn.Module):
-    def __init__(self, model: EstimatorBase):
-        super().__init__()
-        self.model = model
-
-    def forward(self, capt_img, pin_volume):
-        return self.model(capt_img, pin_volume).est_depthmap
