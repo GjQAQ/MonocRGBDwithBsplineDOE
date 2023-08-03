@@ -79,6 +79,7 @@ class DOECamera(nn.Module, metaclass=abc.ABCMeta):
         self.occlusion = occlusion
         self.scene_distances: torch.Tensor = ...
         self.wavelengths: torch.Tensor = ...
+        self.psf_cache: torch.Tensor = ...
 
         self.register_buffer(
             'scene_distances',
@@ -171,8 +172,8 @@ Input image size: {self.image_size}\
             psf_b = torch.roll(psf[2], shifts=b_shift, dims=(-1, -2))
             psf = torch.stack([psf_r, psf_g, psf_b], dim=0)
 
-        if hasattr(self, 'psf_cache'):
-            self.psf_cache.fill_(psf)
+        if hasattr(self, 'psf_cache') and self.psf_cache is not ...:
+            self.psf_cache = psf
         else:
             self.register_buffer('psf_cache', psf, persistent=False)
         return utils.pad_or_crop(self.psf_cache, size)

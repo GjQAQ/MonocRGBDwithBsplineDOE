@@ -40,5 +40,5 @@ def fold_profile(profile, wavelength, n=1):
     h = profile - profile.min()
     phase_n = h / thichness
     phase_n = torch.floor(phase_n).to(torch.int)
-    h -= phase_n * wavelength
+    h -= phase_n * thichness
     return h
