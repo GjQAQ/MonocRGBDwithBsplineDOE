@@ -46,8 +46,7 @@ class ClassicCamera(optics.DOECamera, metaclass=abc.ABCMeta):
         n = max(3, round(n))
         if n < 2:
             raise ValueError(f'Wrong subsquare number: {n}')
-        wl = self.wavelengths[self.n_wavelengths // 2]
-        return slope_range, n, wl
+        return slope_range, n
 
     def psf(self, scene_distances, modulate_phase):
         with torch.no_grad():
@@ -70,7 +69,9 @@ class ClassicCamera(optics.DOECamera, metaclass=abc.ABCMeta):
             amplitude = amplitude / amplitude.max()
 
         if modulate_phase:
-            phase += utils.heightmap2phase(self.heightmap().unsqueeze(1), wl, utils.refractive_index(wl))
+            phase += utils.heightmap2phase(
+                self.heightmap().unsqueeze(1), wl, utils.refractive_index(wl, self.doe_material)
+            )
 
         psf = old_complex.abs2(fft.old_fft_exp(amplitude, phase))
         sf = self.scale_factor

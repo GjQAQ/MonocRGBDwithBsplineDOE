@@ -11,7 +11,7 @@ def __index(u, diameter, n):
 
 
 def slope2height(
-    u, v, slopemap, index, total, f, d, wl,
+    u, v, slopemap, index, total, f, d, n,
     center='concentric', aperture_diameter=None
 ):
     r2 = u ** 2 + v ** 2
@@ -19,14 +19,12 @@ def slope2height(
     var_depth = d / (1 - slopemap)
     var_focal_length = var_depth * sensor_d / (var_depth + sensor_d)
     sub_focal_length = var_focal_length * f / (f - var_focal_length)
-    roc = (utils.refractive_index(wl) - 1) * sub_focal_length
+    roc = (n - 1) * sub_focal_length
     if center == 'concentric':
         heightmap = torch.sqrt(roc.double() ** 2 - r2.double())
     elif center == 'random':
         uc = (torch.rand(total) - 0.5) * aperture_diameter
         vc = (torch.rand(total) - 0.5) * aperture_diameter
-        # uc = torch.randn(total) * aperture_diameter
-        # vc = torch.randn(total) * aperture_diameter
         r2 = (u - uc[index]) ** 2 + (v - vc[index]) ** 2
         heightmap = torch.sqrt(roc.double() ** 2 - r2.double())
     else:

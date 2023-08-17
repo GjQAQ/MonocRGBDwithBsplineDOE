@@ -400,10 +400,28 @@ class RestormerEstimator(EstimatorBase):
         replaced = {k: v for k, v in state_dict.items()}
 
         key = 'restormer.patch_embed.proj.weight'
-        self.restormer.patch_embed.proj.weight.data[:, :3] = replaced[key]
-        replaced[key] = self.restormer.patch_embed.proj.weight
-
+        replaced[key] = self.__adjust_dim(
+            replaced[key],
+            self.restormer.patch_embed.proj.weight.data,
+            1
+        )
         key = 'restormer.output.weight'
-        self.restormer.output.weight.data[:3] = replaced[key]
-        replaced[key] = self.restormer.output.weight
+        replaced[key] = self.__adjust_dim(
+            replaced[key],
+            self.restormer.output.weight.data,
+            0
+        )
         return super().load_state_dict(replaced, strict)
+
+    @staticmethod
+    def __adjust_dim(source, target, dim):
+        sd = source.shape[dim]
+        td = target.shape[dim]
+        if sd == td:
+            return source
+        elif sd > td:
+            return source.index_select(dim, torch.arange(td))
+        else:
+            return torch.cat((
+                source, target.index_select(dim, torch.arange(sd, td))
+            ), dim)

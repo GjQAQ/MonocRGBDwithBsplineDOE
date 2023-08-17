@@ -65,6 +65,7 @@ class RGBDImagingSystem(pl.LightningModule):
 
         if print_info:
             print(self.camera)
+        self.pinv = True  # todo
 
     def configure_optimizers(self):
         pgs = [{'params': self.decoder.parameters(), 'lr': self.hparams.network_lr}]
@@ -105,7 +106,7 @@ class RGBDImagingSystem(pl.LightningModule):
         #     optimizer.param_groups[1]['lr'] = lr_scale * hp.network_lr
 
         optimizer.step()
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
     def training_step(self, data: dataset.ImageItem, batch_idx: int):
         outputs, mask = self.__step_common(data, False)
@@ -121,6 +122,7 @@ class RGBDImagingSystem(pl.LightningModule):
 
         return data_loss
 
+    @torch.no_grad()
     def validation_step(self, data: dataset.ImageItem, batch_idx: int):
         output, _ = self.__step_common(data, True)
 
@@ -150,17 +152,13 @@ class RGBDImagingSystem(pl.LightningModule):
         self.log('validation/val_loss', val_loss)
 
     def forward(self, img, depthmap, is_testing, precoded=None):
-        if precoded is None:
-            captimgs, psf = self.image(img, depthmap)
-        else:
-            captimgs = precoded
-            psf = None
+        captimgs, psf = self.image(img, depthmap)
 
         # Apply the Tikhonov-regularized inverse
-        # pinv_volumes = inverse.tikhonov_inverse(
-        #     captimgs, psf, self.hparams.reg_tikhonov, True
-        # )
-        pinv_volumes = None
+        pinv_volumes = inverse.tikhonov_inverse(
+            captimgs, psf, self.hparams.reg_tikhonov, True
+        ) if self.pinv else None  # todo
+        # pinv_volumes = None
 
         # # Feed the cropped images to CNN
         # if self.training and self.hparams.depth_forcing:
@@ -188,7 +186,7 @@ class RGBDImagingSystem(pl.LightningModule):
         img_linear = utils.srgb_to_linear(img)
 
         captimgs, _, _ = self.camera(img_linear, depthmap)
-        psf = self.camera.final_psf().unsqueeze(0)
+        psf = self.camera.final_psf(captimgs.shape[-2:]).unsqueeze(0)
 
         # Crop the boundary artifact of DFT-based convolution
         captimgs = utils.crop_boundary(captimgs, self.crop_width)

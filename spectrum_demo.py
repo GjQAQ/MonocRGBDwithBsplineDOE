@@ -72,7 +72,7 @@ def plain_lens_spectrum(delta0, f, d, aperture, wl, s):
 
 
 def lattice_focal_spectrum(
-    delta0, f, d_min, d_max, aperture, wl,
+    delta0, f, d_min, d_max, aperture, wl, refr_index=None,
     show_slopemap=False,
     show_heightmap=False,
     by_heightmap=False
@@ -94,12 +94,12 @@ def lattice_focal_spectrum(
 
         if by_heightmap:
             heightmap = algorithm.slope2height(
-                u, v, slopemap, index, n * n, f, focal_depth, wl
+                u, v, slopemap, index, n * n, f, focal_depth, refr_index
             )
             if show_heightmap:
                 plt.imshow(heightmap[2][2].detach())
                 plt.show()
-            phase = utils.heightmap2phase(heightmap, wl, utils.refractive_index(wl))
+            phase = utils.heightmap2phase(heightmap, wl, refr_index)
         else:
             phase = np.pi * slopemap * r2 / (wl * focal_depth)
 

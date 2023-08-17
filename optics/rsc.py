@@ -86,8 +86,7 @@ class RotationallySymmetricCamera(optics.base.DOECamera):
         return _copy_quadruple(heightmap11).squeeze()
 
     def aberration(self, u, v, wavelength=None):
-        if wavelength is None:
-            wavelength = self.wavelengths[len(self.wavelengths) / 2]
+        wavelength = wavelength or self.design_wavelength
         profile = self.heightmap1d
 
         r2 = u ** 2 + v ** 2
@@ -96,7 +95,7 @@ class RotationallySymmetricCamera(optics.base.DOECamera):
         index = index.to(dtype=torch.int64)
         h = profile[index]
 
-        phase = utils.heightmap2phase(h, wavelength, utils.refractive_index(wavelength))
+        phase = utils.heightmap2phase(h, wavelength, utils.refractive_index(wavelength, self.doe_material))
         return self.apply_stop(fft.exp2xy(1, phase), r2=torch.stack([r2, r2], -1))
 
     def specific_log(self, *args, **kwargs):
@@ -219,7 +218,7 @@ class RotationallySymmetricCamera(optics.base.DOECamera):
             phase += utils.heightmap2phase(
                 self.heightmap1d.reshape(1, -1),  # add wavelength dim
                 wavelengths,
-                utils.refractive_index(wavelengths)
+                utils.refractive_index(wavelengths, self.doe_material)
             )
 
         # broadcast the matrix-vector multiplication

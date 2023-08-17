@@ -44,6 +44,7 @@ class DOECamera(nn.Module, metaclass=abc.ABCMeta):
         aperture_diameter: float,
         camera_pitch: float,
         wavelengths=(632e-9, 550e-9, 450e-9),
+        doe_material='NOA61',
         diffraction_efficiency=0.7,
         aperture_type='circular',
         occlusion=True,
@@ -77,6 +78,7 @@ class DOECamera(nn.Module, metaclass=abc.ABCMeta):
         self.noise_sigma = noise_sigma
         self.n_depths = n_depths
         self.occlusion = occlusion
+        self.doe_material = doe_material
         self.scene_distances: torch.Tensor = ...
         self.wavelengths: torch.Tensor = ...
         self.psf_cache: torch.Tensor = ...
@@ -99,14 +101,6 @@ class DOECamera(nn.Module, metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def aberration(self, u, v, wavelength=None) -> torch.Tensor:
         pass
-
-    def extra_repr(self):
-        return f'''\
-Camera module...
-Refcative index for design wavelength: {utils.refractive_index(self.design_wavelength):.3f}
-F number: {self.f_number:.3f}
-Input image size: {self.image_size}\
-              '''
 
     def register_buffer(self, name: str, tensor, persistent: bool = True) -> None:
         if hasattr(self, name) and getattr(self, name) is ...:
@@ -146,7 +140,7 @@ Input image size: {self.image_size}\
         is_training: bool = False,
         use_psf_cache: bool = False
     ):
-        if use_psf_cache and not is_training and hasattr(self, 'psf_cache'):
+        if use_psf_cache and not is_training and self.psf_cache is not ...:
             return utils.pad_or_crop(self.psf_cache, size)
 
         # PSF jitter
@@ -172,7 +166,7 @@ Input image size: {self.image_size}\
             psf_b = torch.roll(psf[2], shifts=b_shift, dims=(-1, -2))
             psf = torch.stack([psf_r, psf_g, psf_b], dim=0)
 
-        if hasattr(self, 'psf_cache') and self.psf_cache is not ...:
+        if self.psf_cache is not ...:
             self.psf_cache = psf
         else:
             self.register_buffer('psf_cache', psf, persistent=False)
@@ -199,6 +193,13 @@ Input image size: {self.image_size}\
     def scale_coordinate(self, x):
         x = x / self.aperture_diameter + 0.5
         return torch.clamp(x, 0, 1)
+
+    def wrap_profile(self, h):
+        if self.doe_material == 'SiO_2':
+            h = utils.fold_profile(h, self.design_wavelength / (self.center_n - 1))
+        elif self.doe_material == 'NOA61':
+            h = utils.fold_profile(h, 2e-6)
+        return h
 
     # logging method shuould be executed on cpu
 
@@ -253,6 +254,14 @@ Input image size: {self.image_size}\
         return len(self.wavelengths)
 
     @property
+    def n(self):
+        return utils.refractive_index(self.wavelengths, self.doe_material)
+
+    @property
+    def center_n(self):
+        return utils.refractive_index(self.design_wavelength, self.doe_material)
+
+    @property
     def otf(self):
         psf = self.final_psf(use_psf_cache=True)
         return fft.fftshift(torch.rfft(psf, 2, onesided=False), (-2, -3))
@@ -275,6 +284,7 @@ Input image size: {self.image_size}\
         parser.add_argument('--focal_depth', type=float, default=1.7, help='Focal depth in metre')
         parser.add_argument('--focal_length', type=float, default=50e-3, help='Focal length in metre')
         parser.add_argument('--f_number', type=float, default=6.3, help='F number')
+        parser.add_argument('--doe_material', type=str, default='NOA61', choices=['NOA61', 'SiO_2'])
         parser.add_argument(
             '--camera_pixel_pitch', type=float, default=6.45e-6,
             help='Width of a sensor element in metre'
@@ -330,7 +340,7 @@ Input image size: {self.image_size}\
         }
         for k in (
             'min_depth', 'max_depth', 'focal_depth', 'n_depths', 'focal_length',
-            'diffraction_efficiency', 'aperture_type', 'occlusion', 'bayer'
+            'diffraction_efficiency', 'aperture_type', 'occlusion', 'bayer', 'doe_material'
         ):
             params[k] = kwargs[k]
         return params

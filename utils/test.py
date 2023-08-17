@@ -167,7 +167,7 @@ def eval_checkpoint(metrics, ckpt_path, override=None, **kwargs):
         hparams['noise_sigma_min'] = 0
         hparams['noise_sigma_max'] = 0
 
-    if __sf is None:
+    if __sf is None or kwargs.get('init_dataset', False):
         __init_dataset(hparams)
 
     model = mod.RGBDImagingSystem.construct_from_checkpoint(ckpt)

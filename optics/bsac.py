@@ -81,20 +81,19 @@ class BSplineApertureCamera(optics.ClassicCamera):
 
     @torch.no_grad()
     def lattice_focal_init(self):
-        slope_range, n, wl = self.prepare_lattice_focal_init()
+        slope_range, n = self.prepare_lattice_focal_init()
         r = self.aperture_diameter / 2
         u = torch.linspace(-r, r, self.grid_size[0])[None, ...]
         v = torch.linspace(-r, r, self.grid_size[1])[..., None]
         return algorithm.slope2height(
             u, v,
             *algorithm.slopemap(u, v, n, slope_range, self.aperture_diameter, fill='inscribe'),
-            12, self.focal_length, self.focal_depth, wl
+            12, self.focal_length, self.focal_depth, self.center_n
         )
 
     @torch.no_grad()
     def aberration(self, u, v, wavelength: float = None):
-        if wavelength is None:
-            wavelength = self.wavelengths[len(self.wavelengths) / 2]
+        wavelength = wavelength or self.design_wavelength
         c = self.control_points.cpu()[None, None, ...]
 
         r2 = u ** 2 + v ** 2
@@ -104,7 +103,7 @@ class BSplineApertureCamera(optics.ClassicCamera):
         v_mat = self.design_matrices(scaled_v, c.shape[-1], self.knot_vectors[1], self.degrees[1])
         h = self.__heightmap(u_mat, v_mat, c)
 
-        phase = utils.heightmap2phase(h, wavelength, utils.refractive_index(wavelength))
+        phase = utils.heightmap2phase(h, wavelength, utils.refractive_index(wavelength, self.doe_material))
         phase = torch.transpose(phase, 0, 1)
         return self.apply_circular_stop(
             fft.exp2xy(1, phase),
@@ -168,7 +167,7 @@ class BSplineApertureCamera(optics.ClassicCamera):
 
     def __heightmap(self, u, v, c) -> Tensor:
         h = torch.matmul(torch.matmul(u, c), torch.transpose(v, -1, -2))
-        return utils.fold_profile(h, self.design_wavelength)
+        return self.wrap_profile(h)
 
     @staticmethod
     def design_matrices(x, c_n, kv, p):
