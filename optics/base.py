@@ -1,94 +1,88 @@
 import abc
-import typing
-import argparse
+from typing import Tuple, Union, List, cast
 
+from kornia import color
+from kornia.geometry import rotate
 import numpy as np
 import torch
 import torchvision.utils
-from torch import nn as nn
-import debayer
+from torch import nn, Tensor
 
-import algorithm.image
+import domain.depth
+import domain.imaging
 import utils
-from utils import fft as fft, old_complex as old_complex
 
-camera_dir = {}
-aperture_types = ('circular', 'square')
+__all__ = [
+    'quantize',
 
-
-def register_camera(name, cls):
-    camera_dir[name] = cls
-
-
-def get_camera(name):
-    if name in camera_dir:
-        return camera_dir[name]
-    else:
-        raise ValueError(f'Unknown camera type: {name}')
+    'DOECamera',
+    'DummyCamera',
+]
 
 
-def construct_camera(name, params):
-    ct = get_camera(name)
-    return ct(**ct.extract_parameters(params))
+def quantize(
+    heightmap: Tensor,
+    quant_levels: int,
+) -> Tensor:
+    if heightmap.min() < 0. or heightmap.max() > 1.:
+        raise ValueError(f'The height map to be quantized should be normalized to [0, 1]')
+
+    quantized = heightmap * (quant_levels - 1)  # 0,1,...,L-1
+    quantized = torch.round(quantized)
+    quantized = quantized / (quant_levels - 1)
+    return quantized
 
 
 class DOECamera(nn.Module, metaclass=abc.ABCMeta):
+    wavelengths: Tensor
+    psf_cache: Tensor
+    sv_psf_cache: Tensor
+
     def __init__(
         self, *,
         focal_depth: float,
-        min_depth: float,
-        max_depth: float,
+        depth_range: tuple[float, float],
         n_depths: int,
-        image_size: typing.Union[int, typing.List[int]],
+        psf_size: Union[int, List[int]],
         focal_length: float,
         aperture_diameter: float,
-        camera_pitch: float,
+        camera_pixel_pitch: float,
         wavelengths=(632e-9, 550e-9, 450e-9),
+        doe_material='NOA61',
         diffraction_efficiency=0.7,
-        aperture_type='circular',
-        occlusion=True,
         bayer=True,
         noise_sigma=(1e-3, 5e-3),
-        design_wavelength=None
+        design_wavelength=None,
+        quantize_doe: bool = False
     ):
         super().__init__()
-        self.__applying_stop = {
-            'circular': self.apply_circular_stop,
-            'square': self.apply_square_stop
-        }
-        if min_depth < 1e-6:
-            raise ValueError(f'Provided min depth({min_depth}) is too small')
-        if aperture_type not in self.__applying_stop:
-            raise ValueError(f'Unknown aperture type: {aperture_type}')
         if design_wavelength is None:
             design_wavelength = wavelengths[len(wavelengths) // 2]
 
-        self.debayer = debayer.Debayer3x3() if bayer else None
+        self.bayer = bayer
 
         self.aperture_diameter = aperture_diameter
-        self.aperture_type = aperture_type
-        self.camera_pitch = camera_pitch
-        self.depth_range = (min_depth, max_depth)
+        self.camera_pixel_pitch = camera_pixel_pitch
+        self.depth_range = depth_range
         self.design_wavelength = design_wavelength
         self.diffraction_efficiency = diffraction_efficiency
         self.focal_depth = focal_depth
         self.focal_length = focal_length
-        self.image_size = self.regularize_image_size(image_size)
+        self.psf_size = self.regularize_image_size(psf_size)
         self.noise_sigma = noise_sigma
         self.n_depths = n_depths
-        self.occlusion = occlusion
-        self.scene_distances: torch.Tensor = ...
-        self.wavelengths: torch.Tensor = ...
+        self.doe_material = doe_material
+        self.psf_robust_jitter = True
+        self.psf_robust_shift = 2
+        self.psf_robust_rotate = 0.
+        self.quantize_doe = quantize_doe
 
-        self.register_buffer(
-            'scene_distances',
-            utils.ips_to_metric(torch.linspace(0, 1, steps=n_depths), min_depth, max_depth),
-            persistent=False
-        )
-        self.register_buffer('wavelengths', torch.tensor(wavelengths), persistent=False)
+        self.register_buffer('wavelengths', torch.tensor(wavelengths))
+        self.register_buffer('psf_cache', None)
+        self.register_buffer('sv_psf_cache', None)
 
     @abc.abstractmethod
-    def psf(self, scene_distances, modulate_phase) -> torch.Tensor:
+    def psf(self, scene_distances, modulate_phase, wavefront_error=None) -> torch.Tensor:
         pass
 
     @abc.abstractmethod
@@ -99,111 +93,165 @@ class DOECamera(nn.Module, metaclass=abc.ABCMeta):
     def aberration(self, u, v, wavelength=None) -> torch.Tensor:
         pass
 
-    def extra_repr(self):
-        return f'''\
-Camera module...
-Refcative index for design wavelength: {utils.refractive_index(self.design_wavelength):.3f}
-F number: {self.f_number:.3f}
-Input image size: {self.image_size}\
-              '''
+    def forward(self, image: Tensor, depthmap: Tensor, space_variant: bool = False, **kwargs):
+        """
+        Given the ground truth image and depth map, render a sensor image.
 
-    def register_buffer(self, name: str, tensor, persistent: bool = True) -> None:
-        if hasattr(self, name) and getattr(self, name) is ...:
-            delattr(self, name)
-        return super().register_buffer(name, tensor, persistent)
+        Potential additional arguments:
 
-    def forward(self, img, depthmap, noise=True):
-        psf = self.final_psf(img.shape[-2:], is_training=self.training).unsqueeze(0)
-        psf = self.normalize(psf)
-        captimg, volume = self.get_capt_img(img, depthmap, psf, self.occlusion)
-        if noise:
-            captimg = self.apply_noise(captimg)
-        return captimg, volume, psf
-
-    def apply_noise(self, img):
-        kwargs = {'dtype': img.dtype, 'device': img.device}
-        n_min, n_max = self.noise_sigma
-        noise_sigma = (n_max - n_min) * torch.rand((img.shape[0], 1, 1, 1), **kwargs) + n_min
-
-        if self.debayer is None:
-            img = img + noise_sigma * torch.randn(img.shape, **kwargs)
+        * wavefront_error
+        * patches: Number of patches in vertical and horizontal direction when space-variant PSF used.
+        * padding: Padding amount when space-variant PSF used.
+        * use_psf_cache: Whether to use cached PSF.
+        :param image: Ground truth image, a tensor of shape ... x C x H x W.
+        :param depthmap: Ground truth depth map, a tensor of shape ... x H x W.
+            Range of value is [0, 1], 0 corresponding to the nearest pixels.
+        :param space_variant: Whether to use a space-variant PSF.
+        :param kwargs: Additional arguments.
+        :return: Sensor image, a tensor of shape ... x C x H x W.
+        """
+        wfe = kwargs.get('wavefront_error', None)
+        padding = ...
+        if space_variant:
+            patches = kwargs['patches']
+            padding = kwargs['padding']
+            psf_size: Tuple = tuple([image.shape[i - 2] // patches[i] + 2 * padding for i in (0, 1)])
+            psf = self.space_variant_psf(patches, psf_size, wfe)
         else:
-            captimgs_bayer = utils.to_bayer(img)
-            captimgs_bayer = captimgs_bayer + noise_sigma * torch.randn(captimgs_bayer.shape, **kwargs)
-            img = self.debayer(captimgs_bayer)
-        return img
+            use_psf_cache = kwargs.get('use_psf_cache', False)
+            psf = self.final_psf(
+                image.shape[-2:], wfe,
+                is_training=self.training, use_psf_cache=use_psf_cache
+            ).unsqueeze(0)
+        psf = self.normalize(psf)
 
-    def get_capt_img(self, img, depthmap, psf, occlusion):
         with torch.no_grad():
-            layered_mask = utils.depthmap2layers(depthmap, self.n_depths, binary=True)
-            volume = layered_mask * img[:, :, None, ...]
-        return algorithm.image.image_formation(volume, layered_mask, psf, occlusion)
+            alpha = utils.depthmap2layers(depthmap, self.n_depths, binary=True).squeeze(1)
+        if space_variant:
+            captured = domain.imaging.patch_wise_imaging(image, alpha, psf, (padding, padding))
+        else:
+            captured = domain.imaging.occlusion_aware_imaging(image, alpha, psf.transpose(1, 2))
+
+        captured = self.apply_noise(captured)
+        return captured
+
+    def apply_noise(self, noise_free):
+        kwargs = {'dtype': noise_free.dtype, 'device': noise_free.device}
+        n_min, n_max = self.noise_sigma
+        noise_sigma = (n_max - n_min) * torch.rand((noise_free.shape[0], 1, 1, 1), **kwargs) + n_min
+
+        if self.bayer:
+            captured = color.rgb_to_raw(noise_free, color.CFA.BG)
+            captured = captured + noise_sigma * torch.randn(captured.shape, **kwargs)
+            noise_free = color.raw_to_rgb(captured, color.CFA.BG)
+        else:
+            noise_free = noise_free + noise_sigma * torch.randn(noise_free.shape, **kwargs)
+        return noise_free
 
     def final_psf(
         self,
-        size: typing.Tuple[int, int] = None,
+        size: Tuple[int, int] = None,
+        wavefront_error: Tensor = None,
         is_training: bool = False,
         use_psf_cache: bool = False
     ):
-        if use_psf_cache and not is_training and hasattr(self, 'psf_cache'):
-            return utils.pad_or_crop(self.psf_cache, size)
+        if size is None:
+            size = self.psf_size
+        if use_psf_cache and not is_training and self.psf_cache is not None:
+            return utils.zoom(self.psf_cache, size)
 
         # PSF jitter
         device = self.device
         init_sd = torch.linspace(0, 1, steps=self.n_depths, device=device)
-        if is_training:
+        if is_training and self.psf_robust_jitter:
             init_sd += (torch.rand(self.n_depths, device=device) - 0.5) / self.n_depths
-        scene_distances = utils.ips_to_metric(init_sd, self.min_depth, self.max_depth)
-        if is_training:
+        scene_distances = domain.depth.ips2depth(init_sd, self.min_depth, self.max_depth)
+        if is_training and self.psf_robust_jitter:
             scene_distances[-1] += torch.rand(1, device=device)[0] * (100.0 - self.max_depth)
 
-        dif_psf = self.normalize(self.psf(scene_distances, True))
-        undif_psf = self.undiffracted_psf()
-        psf = self.diffraction_efficiency * dif_psf + (1 - self.diffraction_efficiency) * undif_psf
+        dif_psf = self.normalize(self.psf(scene_distances, True, wavefront_error))
+        if self.diffraction_efficiency != 1.:
+            undif_psf = self.normalize(self.psf(scene_distances, False, wavefront_error))
+            psf = self.diffraction_efficiency * dif_psf + (1 - self.diffraction_efficiency) * undif_psf
+        else:
+            psf = dif_psf
 
         # In training, randomly pixel-shifts the PSF around green channel.
-        if is_training:
-            max_shift = 2
+        if is_training and self.psf_robust_shift:
+            max_shift = self.psf_robust_shift
             r_shift = tuple(np.random.randint(low=-max_shift, high=max_shift, size=2))
             b_shift = tuple(np.random.randint(low=-max_shift, high=max_shift, size=2))
             psf_r = torch.roll(psf[0], shifts=r_shift, dims=(-1, -2))
             psf_g = psf[1]
             psf_b = torch.roll(psf[2], shifts=b_shift, dims=(-1, -2))
             psf = torch.stack([psf_r, psf_g, psf_b], dim=0)
+        if is_training and self.psf_robust_rotate > 0.:
+            angle = (torch.rand(1, device=device) - 0.5) * 2 * self.psf_robust_rotate
+            c, d, h, w = psf.shape
+            psf = rotate(psf.reshape(1, c * d, h, w), cast(Tensor, angle))
+            psf = psf.reshape(c, d, h, w)
 
-        if hasattr(self, 'psf_cache'):
-            self.psf_cache.fill_(psf)
+        if self.psf_cache is not None:
+            self.psf_cache = psf
         else:
             self.register_buffer('psf_cache', psf, persistent=False)
-        return utils.pad_or_crop(self.psf_cache, size)
+        return utils.zoom(self.psf_cache, size)
 
-    def apply_stop(self, *args, **kwargs):
-        return self.__applying_stop[self.aperture_type](*args, **kwargs)
+    def space_variant_psf(
+        self,
+        slices: Tuple[int, int],
+        size: Tuple[int, int] = None,
+        wavefront_error: Tensor = None
+    ) -> Tensor:
+        """
+        Given wavefront error on aperture at different field of view,
+        computing space-variant PSF slices :math:`p_d(x',y',x-x',y-y')`,
+        where :math:`(x',y')` is the center of a PSF slice, corresponding a certain field of view.
+        :param slices: Numbers of slices in vertical and horizontal directions,
+            i.e. numbers of samping point of :math:`y'` and :math:`x'`, respectively.
+        :param size: Size of each PSF slice.
+        :param wavefront_error: Wavefront error at different field of view,
+            a tensor of shape ``slices[0]`` x ``slices[1]`` x C x D x H x W.
+        :return: PSF slices, a tensor of shape
+            ``slices[0]`` x ``slices[1]`` x D x C x ``size[0]`` x ``size[1]``.
+        """
+        if self.sv_psf_cache is not None:
+            return self.sv_psf_cache
 
-    def apply_circular_stop(self, f, limit=None, **kwargs):
+        if size is None:
+            size = self.psf_size
+        if wavefront_error is None:
+            wavefront_error = torch.tensor(0)
+
+        psf = torch.zeros(*slices, self.n_depths, self.n_wavelengths, *size).to(self.device)
+        for i in range(slices[0]):
+            for j in range(slices[1]):
+                psf[i, j] = self.final_psf(size, wavefront_error[i, j]).transpose(0, 1)
+        self.register_buffer('sv_psf_cache', psf, persistent=False)
+        return psf
+
+    def apply_stop(self, f, limit=None, **kwargs):
         r2 = kwargs['r2']
         if limit is None:
             limit = self.aperture_diameter / 2
         return torch.where(r2 < limit ** 2, f, torch.zeros_like(f))
 
-    def apply_square_stop(self, f, limit=None, **kwargs):
-        x, y = kwargs['x'], kwargs['y']
-        if limit is None:
-            limit = self.aperture_diameter / 2
-        return torch.where(
-            torch.logical_and(torch.abs(x) < limit, torch.abs(y) < limit),
-            f, torch.zeros_like(f)
-        )
-
     def scale_coordinate(self, x):
         x = x / self.aperture_diameter + 0.5
         return torch.clamp(x, 0, 1)
+
+    def wrap_profile(self, h):
+        if self.doe_material == 'SiO_2':
+            h = utils.fold_profile(h, self.design_wavelength / (self.center_n - 1))
+        elif self.doe_material == 'NOA61':
+            h = utils.fold_profile(h, 2e-6)
+        return h
 
     # logging method shuould be executed on cpu
 
     @torch.no_grad()
     def heightmap_log(self, size):
-        heightmap = utils.img_resize(self.heightmap().cpu()[None, None, ...], size).squeeze(0)
+        heightmap = utils.scale(self.heightmap().cpu()[None, None, ...], size).squeeze(0)
         heightmap -= heightmap.min()
         heightmap /= heightmap.max()
         return heightmap
@@ -211,7 +259,7 @@ Input image size: {self.image_size}\
     @torch.no_grad()
     def psf_log(self, log_size, depth_step=1):
         # PSF is not visualized at computed size.
-        psf = self.final_psf(log_size, is_training=False, use_psf_cache=True).cpu()
+        psf = self.final_psf(log_size, is_training=False, use_psf_cache=False).cpu()
         psf = self.normalize(psf)
         psf /= psf.max()
         streched_psf = psf / psf.amax(dim=(0, 2, 3), keepdim=True)
@@ -224,7 +272,7 @@ Input image size: {self.image_size}\
         return self.make_grid(mtf, depth_step)
 
     @torch.no_grad()
-    def specific_log(self, *args, **kwargs):
+    def specific_training_log(self, *args, **kwargs):
         return {}
 
     @property
@@ -252,94 +300,16 @@ Input image size: {self.image_size}\
         return len(self.wavelengths)
 
     @property
-    def otf(self):
-        psf = self.final_psf(use_psf_cache=True)
-        return fft.fftshift(torch.rfft(psf, 2, onesided=False), (-2, -3))
+    def n(self):
+        return utils.refractive_index(self.wavelengths, self.doe_material)
 
     @property
-    def mtf(self):
-        return old_complex.abs(self.otf)
+    def center_n(self):
+        return utils.refractive_index(self.design_wavelength, self.doe_material)
 
     @property
     def device(self):
-        return next(self.parameters()).device
-
-    @classmethod
-    def add_specific_args(cls, parser):
-        parser = argparse.ArgumentParser(parents=[parser], add_help=False)
-
-        # physics arguments
-        parser.add_argument('--min_depth', type=float, default=1, help='Minimum depth in metre')
-        parser.add_argument('--max_depth', type=float, default=5, help='Maximum depth in metre')
-        parser.add_argument('--focal_depth', type=float, default=1.7, help='Focal depth in metre')
-        parser.add_argument('--focal_length', type=float, default=50e-3, help='Focal length in metre')
-        parser.add_argument('--f_number', type=float, default=6.3, help='F number')
-        parser.add_argument(
-            '--camera_pixel_pitch', type=float, default=6.45e-6,
-            help='Width of a sensor element in metre'
-        )
-        parser.add_argument(
-            '--noise_sigma_min', type=float, default=1e-3,
-            help='Minimum standard deviation of Gaussian noise'
-        )
-        parser.add_argument(
-            '--noise_sigma_max', type=float, default=5e-3,
-            help='Maximum standard deviation of Gaussian noise'
-        )
-        parser.add_argument('--diffraction_efficiency', type=float, default=0.7, help='Diffraction efficiency')
-
-        # type option
-        parser.add_argument(
-            '--aperture_type', type=str, default='circular',
-            help=f'Type of aperture shape',
-            choices=aperture_types
-        )
-        parser.add_argument(
-            '--initialization_type', type=str, default='default',
-            help='How to initialize DOE profile'
-        )
-
-        # image arguments
-        parser.add_argument('--psf_size', type=int, default=64, help='Size of PSF image for log')
-        parser.add_argument('--image_sz', type=int, default=256, help='Final size of processed images')
-        parser.add_argument('--n_depths', type=int, default=16, help='Number of depth layers')
-        parser.add_argument('--crop_width', type=int, default=32, help='Width of margin to be cropped')
-
-        # switches
-        utils.add_switch(parser, 'bayer', True, 'Whether or not to use bayer format')
-        utils.add_switch(parser, 'occlusion', True, 'Whether or not to use non-linear image formation model')
-        utils.add_switch(parser, 'optimize_optics', True, 'Whether or not to optimize DOE')
-        return parser
-
-    @classmethod
-    def extract_parameters(cls, kwargs) -> typing.Dict:
-        """
-        Collect instantiation paramters from a dict.
-        :param kwargs: Input dict
-        :return: Parameters dict which contains just all parameters needed for camera instantiation
-        """
-        params = {
-            'wavelengths': (632e-9, 550e-9, 450e-9),
-            'image_size': kwargs['image_sz'] + 4 * kwargs['crop_width'],
-            'camera_pitch': kwargs['camera_pixel_pitch'],
-            'aperture_diameter': kwargs['focal_length'] / kwargs['f_number'],
-            'requires_grad': kwargs['optimize_optics'],
-            'init_type': kwargs['initialization_type'],
-            'noise_sigma': (kwargs['noise_sigma_min'], kwargs['noise_sigma_max'])
-        }
-        for k in (
-            'min_depth', 'max_depth', 'focal_depth', 'n_depths', 'focal_length',
-            'diffraction_efficiency', 'aperture_type', 'occlusion', 'bayer'
-        ):
-            params[k] = kwargs[k]
-        return params
-
-    @torch.no_grad()
-    def undiffracted_psf(self):
-        if not hasattr(self, 'undiff_psf'):
-            ud = self.psf(self.scene_distances, False)
-            self.register_buffer('undiff_psf', self.normalize(ud), persistent=False)
-        return self.undiff_psf
+        return self.wavelengths.device
 
     @staticmethod
     def make_grid(image, depth_step):
@@ -351,7 +321,7 @@ Input image size: {self.image_size}\
 
     @staticmethod
     def normalize(psf: torch.Tensor):
-        return psf / psf.sum(dim=(-2, -1), keepdims=True)
+        return psf / psf.sum(dim=(-2, -1), keepdim=True)
 
     @staticmethod
     def regularize_image_size(img_sz):
@@ -363,3 +333,20 @@ Input image size: {self.image_size}\
         else:
             raise ValueError('image_size has to be int or list of int.')
         return img_sz
+
+
+class DummyCamera(DOECamera):
+    def psf(self, scene_distances, modulate_phase, wavefront_error=None) -> torch.Tensor:
+        raise NotImplementedError()
+
+    def heightmap(self) -> torch.Tensor:
+        raise NotImplementedError()
+
+    def aberration(self, u, v, wavelength=None) -> torch.Tensor:
+        raise NotImplementedError()
+
+    def psf_log(self, log_size, depth_step=1):
+        return None
+
+    def heightmap_log(self, size):
+        return None

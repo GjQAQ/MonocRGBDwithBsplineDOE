@@ -5,11 +5,19 @@ import warnings
 import torch
 import torch.nn as nn
 
+__all__ = [
+    'init_module',
+    'freeze_norm',
+    'freeze_params',
+    'submodule_state_dict',
+    'switch_trainable',
+]
+
 
 def init_module(module: nn.Module):
     for m in module.modules():
         if isinstance(m, nn.Conv2d):
-            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            nn.init.kaiming_normal_(m.weight, 0.01, mode='fan_out', nonlinearity='leaky_relu')
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.BatchNorm2d):
@@ -28,7 +36,10 @@ def freeze_norm(model):
             m.momentum = 0
 
 
-def freeze_params(model, matcher: Callable):
+def freeze_params(model: nn.Module, matcher: Callable[[str], bool] = None):
+    if matcher is None:
+        def matcher(_): return True
+
     record = []
     total = 0
     for name, param in model.named_parameters():
@@ -46,13 +57,3 @@ def submodule_state_dict(prefix, state_dict) -> OrderedDict[str, torch.Tensor]:
         for key, value in state_dict.items()
         if key.startswith(prefix)
     })
-
-
-def load_state_dict_unstrict(module: nn.Module, state_dict):
-    result = module.load_state_dict(state_dict, False)
-    if bool(result.missing_keys) or bool(result.unexpected_keys):
-        warnings.warn(
-            f'Incompatible state dictionary - Missing keys: {result.missing_keys}; '
-            f'Unexpected keys: {result.unexpected_keys}',
-            RuntimeWarning
-        )

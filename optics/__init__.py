@@ -1,11 +1,6 @@
-from optics.base import *
-from optics.rsc import *
-from optics.classic import *
-from optics.bsac import *
-from optics.zernike import *
-
-
-register_camera('rs', RotationallySymmetricCamera)
-register_camera('b-spline', BSplineApertureCamera)
-register_camera('bspline', BSplineApertureCamera)
-register_camera('zernike', ZernikeApertureCamera)
+from .base import *
+from .classic import *
+from .bsac import *
+from .zernike import *
+from .concentric import *
+from .measured import *

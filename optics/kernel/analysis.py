@@ -3,8 +3,7 @@ from typing import Callable, Tuple, Iterable
 import numpy as np
 import torch
 
-import utils.fft as fft
-import utils.old_complex as old_complex
+import utils.ft as ft
 
 
 def get_delta(delta0, f, d):
@@ -57,16 +56,15 @@ def kernel_spectrum(
     v = torch.flip(v, (0,))
 
     phi1, phi2 = phi(t1 + u / 2, t2 + v / 2), phi(t1 - u / 2, t2 - v / 2)
-    xi = old_complex.multiply(phi1, old_complex.conj(phi2))
+    xi = phi1 * phi2.conj()
 
-    res = fft.fftshift(old_complex.abs2(torch.ifft(xi, 2)))
+    res = ft.ift2(xi, *dt).abs()
     if c1 != 0 and c2 != 0:
         res = res[..., c1:-c1, c2:-c2]
-    res = torch.sqrt(res)
     if scale:
         res /= torch.max(res)
 
     if show_xi:
-        return res, old_complex.abs(xi),
+        return res, xi.abs()
     else:
         return res

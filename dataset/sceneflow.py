@@ -1,148 +1,221 @@
-import os
-import typing
+import abc
+from pathlib import Path
+from typing import Literal, Dict, List, Iterator
+import warnings
 
+from kornia import filters
 import torch
+from torch import Tensor
 import torch.utils.data as data
-import numpy as np
-import imageio
-import kornia.augmentation as augmentation
-import kornia.filters as filters
-from torchvision import io
-from tqdm import tqdm
 
-import dataset
-import dataset.img_transform
-from utils import srgb_to_linear, crop_boundary
+import utils
 
+__all__ = [
+    'SceneFlowDriving',
+    'SceneFlowFlyingThings3D',
+    'SceneFlowFlyingThings3DSubset',
+    'SceneFlowMonkaa',
+]
 
-def sf_paths(root):
-    paths = {}
-    for p in ('train', 'val'):
-        paths[p] = {
-            'img': os.path.join(
-                root, 'FlyingThings3D_subset', p, 'image_clean', 'right'
-            ),
-            'disparity': os.path.join(
-                root, 'FlyingThings3D_subset_disparity', p, 'disparity', 'right'
-            )
-        }
-    return paths
+SF_FILTER = True
 
 
-class SceneFlow(data.Dataset):
-    def __init__(
-        self,
-        sf_root: str,
-        split: str,
-        image_size: typing.Tuple[int, int],
-        is_training: bool = True,
-        random_crop: bool = False,
-        augment: bool = False,
-        padding: int = 0,
-        n_depths: int = 16,
-        ignore_incomplete: bool = True
-    ):
-        super().__init__()
-        self.__dataset_path = sf_paths(sf_root)
+class SceneFlowBase(data.Dataset, metaclass=abc.ABCMeta):
+    size: int
+    _list: List[Path]
 
-        if split not in self.__dataset_path:
-            raise ValueError(f'Wrong dataset: {split}; expected: {self.__dataset_path.keys()}')
+    resolution = (540, 960)
+    depth_type = 'disp_scale'
 
-        self.__transform = dataset.img_transform.RandomTransform(image_size, random_crop, augment)
-        self.__centercrop = augmentation.CenterCrop(image_size)
-
-        self.__records = []
-        pfm_missing_ids = []
-        img_dir = self.__dataset_path[split]['img']
-        disparity_dir = self.__dataset_path[split]['disparity']
-        for filename in sorted(os.listdir(img_dir)):
-            if not filename.endswith('.png'):
-                continue
-
-            id_ = os.path.splitext(filename)[0]
-            disparity_path = os.path.join(disparity_dir, f'{id_}.pfm')
-            if not os.path.exists(disparity_path):
-                pfm_missing_ids.append(id_)
-                continue
-
-            self.__records.append(id_)
-
-        if pfm_missing_ids and not ignore_incomplete:
-            raise ResourceWarning(f'Missing pfm files: {pfm_missing_ids}')
-
-        self.__is_training = torch.tensor(is_training)
-        self.__padding = padding
-        self.__n_depths = n_depths
-        self.split = split
+    def __init__(self, view: Literal['left', 'right'] = 'right'):
+        self.view = view
 
     def __len__(self):
-        return len(self.__records)
+        return len(self._list)
 
-    def __getitem__(self, item: int) -> dataset.img_transform.ImageItem:
-        id_ = self.__records[item]
-        img_dir = self.__dataset_path[self.split]['img']
-        disparity_dir = self.__dataset_path[self.split]['disparity']
+    def __getitem__(self, item: int) -> Dict[str, Tensor]:
+        img_path = self._list[item]
+        img = utils.imread(img_path)  # 3HW, float 0-1
 
-        img, depthmap = self.__prepare(
-            os.path.join(img_dir, f'{id_}.png'),
-            os.path.join(disparity_dir, f'{id_}.pfm')
+        disp_path = self._disp_path(img_path)
+        disp = utils.imread(disp_path)  # HW, float32
+        if SF_FILTER:
+            disp = filters.gaussian_blur2d(disp[None, None, ...], 5, (0.8, 0.8)).squeeze(0)
+        if disp.max() < 1:
+            disp /= disp.max()
+        disp = torch.clamp(disp, min=1e-2)
+        depth = 1. / disp
+        # depth = disp  # todo
+        # depth = disp - disp.min().item()
+        # depth = depth / depth.max().item()
+        # depth = 1. - depth
+        return {
+            'image': img,  # 3HW
+            'depth': depth  # 1HW
+        }
+
+    def _get_list(self) -> List[Path]:
+        img_paths = []
+        missing = []
+        for img_path in self._image_paths():
+            disp_path = self._disp_path(img_path)
+            if not disp_path.exists():
+                missing.append(str(disp_path))
+                continue
+            img_paths.append(img_path)
+
+        img_paths.sort()
+        missing.sort()
+        if len(missing) != 0:
+            warnings.warn(RuntimeWarning(f'Missing disparity files: {missing}'))
+        if len(img_paths) != self.size:
+            warnings.warn(RuntimeWarning(
+                f'Wrong sample number for dataset {self.__class__.__name__}: '
+                f'{len(img_paths)} ({self.size} expected)'
+            ))
+        return img_paths
+
+    @abc.abstractmethod
+    def _disp_path(self, img_path: Path) -> Path:
+        pass
+
+    @abc.abstractmethod
+    def _image_paths(self) -> List[Path]:
+        pass
+
+
+class SceneFlowCommon(SceneFlowBase):
+    def __init__(
+        self,
+        root: utils.Pathlike,
+        view: Literal['left', 'right'] = 'right',
+        pass_name: Literal['clean', 'final'] = 'clean',
+        file_format: Literal['png', 'webp'] = 'png'
+    ):
+        super().__init__(view)
+        self.file_format = file_format
+        self.pass_name = pass_name
+
+        root = utils.makepath(root)
+        image_dir_name = f'frames_{pass_name}pass'
+        if file_format == 'webp':
+            image_dir_name += '_webp'
+        self._image_dir = root / image_dir_name
+        self._disp_dir = root / 'disparity'
+        self._list = self._get_list()
+
+    def _disp_path(self, img_path: Path) -> Path:
+        scene = img_path.parent.parent.name
+        name = img_path.stem
+        disp_path = self._disp_dir / scene / self.view / (name + '.pfm')
+        return disp_path
+
+    def _image_paths(self) -> Iterator[Path]:
+        return self._image_dir.glob(f'*/{self.view}/*.{self.file_format}')
+
+
+class SceneFlowDriving(SceneFlowCommon):
+    def __init__(
+        self,
+        root: utils.Pathlike,
+        view: Literal['left', 'right'] = 'right',
+        pass_name: Literal['clean', 'final'] = 'clean',
+        focal_length: Literal['15', '35', 'all'] = 'all',
+        direction: Literal['forward', 'backward', 'all'] = 'all',
+        rate: Literal['fast', 'slow', 'all'] = 'all',
+        file_format: Literal['png', 'webp'] = 'png'
+    ):
+        super().__init__(root, view, pass_name, file_format)
+        self.focal_length = '*' if focal_length == 'all' else (focal_length + 'mm_focallength')
+        self.direction = '*' if direction == 'all' else ('scene_' + direction + 's')
+        self.rate = '*' if rate == 'all' else rate
+
+        if rate == 'fast':
+            self.size = 300
+        elif rate == 'slow':
+            self.size = 800
+        else:  # all
+            self.size = 1100
+        if direction == 'all':
+            self.size *= 2
+        if focal_length == 'all':
+            self.size *= 2
+
+    def _disp_path(self, img_path: Path) -> Path:
+        components = img_path.parts
+        fl, d, r = components[-5:-2]
+        name = img_path.stem
+        disp_path = self._disp_dir / fl / d / r / self.view / (name + '.pfm')
+        return disp_path
+
+    def _image_paths(self) -> Iterator[Path]:
+        return self._image_dir.glob(
+            f'{self.focal_length}/{self.direction}/{self.rate}/{self.view}/*.{self.file_format}'
         )
 
-        if self.__is_training:
-            img, depthmap = self.__transform(img, depthmap)
+
+class SceneFlowMonkaa(SceneFlowCommon):
+    size = 8664
+
+
+class SceneFlowFlyingThings3D(SceneFlowCommon):
+    _size = {
+        'train': (7460, 7460, 7470),
+        'test': (1440, 1470, 1460)
+    }
+
+    def __init__(
+        self,
+        root: utils.Pathlike,
+        split: Literal['test', 'train'],
+        view: Literal['left', 'right'] = 'right',
+        pass_name: Literal['clean', 'final'] = 'clean',
+        part: Literal['A', 'B', 'C', 'all'] = 'all',
+        file_format: Literal['png', 'webp'] = 'png'
+    ):
+        super().__init__(root, view, pass_name, file_format)
+        self.split = split
+        self.part = part
+
+        if part == 'all':
+            self.size = sum(self._size[split])
         else:
-            img, depthmap = self.__centercrop(img), self.__centercrop(depthmap)
+            self.size = self._size[split][ord(part) - ord('A')]
 
-        # SceneFlow's depthmap has some aliasing artifact. (dfd)
-        depthmap = filters.gaussian_blur2d(depthmap, sigma=(0.8, 0.8), kernel_size=(5, 5))
-        img, depthmap = img.squeeze(0), depthmap.squeeze(0)
+    def _disp_path(self, img_path: Path) -> Path:
+        components = img_path.parts
+        split, part, scene = components[-5:-2]
+        name = img_path.stem
+        disp_path = self._disp_dir / split / part / scene / self.view / (name + '.pfm')
+        return disp_path
 
-        return dataset.ImageItem(id_, img, depthmap, torch.ones_like(depthmap))
-
-    def __prepare(
-        self, img_path: str, disparity_path: str
-    ) -> typing.Tuple[torch.Tensor, torch.Tensor]:
-        img = imageio.imread(img_path).astype(np.float32) / 255.
-        disparity = np.flip(imageio.imread(
-            disparity_path, format='pfm'
-        ), axis=0).astype(np.float32)
-
-        p = self.__padding
-        img = np.pad(img, ((p, p), (p, p), (0, 0)), mode='reflect')
-        disparity = np.pad(disparity, ((p, p), (p, p)), mode='reflect')
-
-        img = torch.from_numpy(img).permute(2, 0, 1)
-        disparity = torch.from_numpy(disparity)[None, ...]
-
-        disparity -= disparity.min()
-        depthmap = 1 - disparity / disparity.max()  # depth of the nearest is 0
-
-        return img, depthmap
+    def _image_paths(self) -> Iterator[Path]:
+        split = self.split.upper()
+        part = '*' if self.part == 'all' else self.part
+        return self._image_dir.glob(f'{split}/{part}/*/{self.view}/*.{self.file_format}')
 
 
-class PreCodedSceneFlow(SceneFlow):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class SceneFlowFlyingThings3DSubset(SceneFlowBase):
+    _size = {'train': 21818, 'val': 4248}
 
-        root = args[0]
-        self.__pre_path = sf_paths(root + '_pre')[self.split]['img']
+    def __init__(
+        self,
+        root: utils.Pathlike,
+        split: Literal['train', 'val'],
+        view: Literal['left', 'right'] = 'right'
+    ):
+        super().__init__(view)
+        self.split = split
 
-    def __getitem__(self, index):
-        original = super().__getitem__(index)
+        root = utils.makepath(root)
+        self._root = root / 'FlyingThings3D_subset'
+        self.size = self._size[split]
+        self._list = self._get_list()
 
-        path = os.path.join(self.__pre_path, f'{original[0]}.png')
-        img = io.read_image(path).to(torch.float32) / 255
-        return original[0], original[1], original[2], original[3], img
+    def _disp_path(self, img_path: Path) -> Path:
+        name = img_path.stem
+        disp_path = self._root / self.split / 'disparity' / self.view / (name + '.pfm')
+        return disp_path
 
-    @classmethod
-    def prepare(cls, root_path, base, split, model, batch_size=1):
-        path = sf_paths(root_path)[split]['img']
-        os.makedirs(path, exist_ok=True)
-        loader = data.DataLoader(base, batch_size)
-
-        for batch in tqdm(loader, ncols=50, unit='batch'):
-            coded, _ = model.image(batch[1].to('cuda'), batch[2].to('cuda'))
-            coded = (coded * 255).to(torch.uint8).cpu()
-            for i, id_ in enumerate(batch[0]):
-                img_path = os.path.join(path, f'{id_}.png')
-                io.write_png(coded[i], img_path)
+    def _image_paths(self) -> Iterator[Path]:
+        return self._root.glob(f'{self.split}/image_clean/{self.view}/*.png')
